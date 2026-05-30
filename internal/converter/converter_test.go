@@ -364,3 +364,74 @@ func TestMoveFile_LargerContent(t *testing.T) {
 		}
 	}
 }
+
+// ── MPEG-TS input handling ──────────────────────────────────────────────────
+//
+// MPEG-TS sources (.ts/.m2ts/...) carry ADTS-framed AAC. Copying that stream
+// into MP4 invokes the aac_adtstoasc bitstream filter, which fatally aborts
+// the whole conversion when it hits a corrupt ADTS header — a common
+// occurrence in IPTV/DVB captures. Reforge must force an AAC re-encode for
+// these inputs to bypass the filter.
+
+func TestBuildConversionArgs_MPEGTSInput_ForcesAACReencode(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+	}{
+		{"ts", "input.ts"},
+		{"ts_uppercase", "input.TS"},
+		{"m2ts", "input.m2ts"},
+		{"mts", "input.mts"},
+		{"m2t", "input.m2t"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			vi := &types.VideoInfo{
+				AudioStreams: []types.AudioStream{
+					{CodecName: "aac", Channels: 2}, // would normally be copied
+				},
+			}
+			args := BuildConversionArgs(tt.in, "out.mp4", ".mp4", "libx265", nil, nil, vi)
+
+			assertContainsSequence(t, args, "-map", "0:a:0")
+			assertContainsSequence(t, args, "-c:a", "aac")
+			assertNotContainsSequence(t, args, "-c:a", "copy")
+		})
+	}
+}
+
+func TestBuildConversionArgs_MPEGTSInput_NilVideoInfo(t *testing.T) {
+	// Without probed audio info we still must avoid -c:a copy for TS inputs.
+	args := BuildConversionArgs("input.ts", "out.mp4", ".mp4", "libx265", nil, nil, nil)
+
+	assertContainsSequence(t, args, "-map", "0:a?")
+	assertContainsSequence(t, args, "-c:a", "aac")
+	assertNotContainsSequence(t, args, "-c:a", "copy")
+}
+
+func TestBuildConversionArgs_MPEGTSInput_MultipleAACStreams(t *testing.T) {
+	vi := &types.VideoInfo{
+		AudioStreams: []types.AudioStream{
+			{CodecName: "aac", Channels: 2},
+			{CodecName: "aac", Channels: 6},
+		},
+	}
+	args := BuildConversionArgs("input.ts", "out.mp4", ".mp4", "libx265", nil, nil, vi)
+
+	assertContainsSequence(t, args, "-map", "0:a:0")
+	assertContainsSequence(t, args, "-map", "0:a:1")
+	assertContainsSequence(t, args, "-c:a", "aac")
+	assertNotContainsSequence(t, args, "-c:a", "copy")
+}
+
+func TestBuildConversionArgs_NonTSInput_StillCopiesAAC(t *testing.T) {
+	// Regression guard: the TS special-case must not affect normal containers.
+	vi := &types.VideoInfo{
+		AudioStreams: []types.AudioStream{
+			{CodecName: "aac", Channels: 2},
+		},
+	}
+	args := BuildConversionArgs("input.mkv", "out.mp4", ".mp4", "libx265", nil, nil, vi)
+
+	assertContainsSequence(t, args, "-c:a", "copy")
+}

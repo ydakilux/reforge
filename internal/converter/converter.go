@@ -256,6 +256,17 @@ func (c *Converter) Process(ctx context.Context, job types.Job, dryRun bool) {
 	}
 }
 
+// mpegTSInputExts is the set of input container extensions that produce
+// ADTS-framed AAC packets. When muxing such streams into MP4 with -c:a copy,
+// ffmpeg implicitly inserts the aac_adtstoasc bitstream filter, which aborts
+// the whole job on the first corrupt ADTS header — and .ts/.m2ts captures
+// are routinely slightly corrupt (PES mismatch, dropped audio packets).
+// For these inputs we always re-encode AAC instead of copying, which
+// bypasses the bitstream filter and lets ffmpeg conceal audio glitches.
+var mpegTSInputExts = map[string]bool{
+	".ts": true, ".m2ts": true, ".mts": true, ".m2t": true,
+}
+
 // mp4CompatibleAudioCodecs is the set of audio codecs that can be stored in an
 // MP4 container without re-encoding. All other codecs (e.g. dts, truehd, mlp)
 // must be transcoded to AAC.
@@ -314,7 +325,7 @@ func BuildConversionArgs(inputPath, outputPath, outputExt, encoderName string, q
 			"-map_chapters", "0",
 		)
 	} else {
-		args = append(args, buildMP4Args(videoInfo)...)
+		args = append(args, buildMP4Args(videoInfo, inputPath)...)
 	}
 
 	args = append(args, outputPath)
@@ -323,35 +334,59 @@ func BuildConversionArgs(inputPath, outputPath, outputExt, encoderName string, q
 
 // buildMP4Args returns the stream-mapping, audio/subtitle codec, HDR
 // passthrough, and movflags arguments specific to the MP4 container.
-func buildMP4Args(videoInfo *types.VideoInfo) []string {
+//
+// inputPath is consulted to detect MPEG-TS sources (.ts/.m2ts/...), which
+// force AAC re-encoding instead of stream copy — see mpegTSInputExts for the
+// rationale (corrupt ADTS frames break the aac_adtstoasc bitstream filter
+// otherwise, failing the whole job at mux time).
+func buildMP4Args(videoInfo *types.VideoInfo, inputPath string) []string {
 	var args []string
 
 	args = append(args, "-map", "0:v:0") // primary video
 
+	forceAACReencode := mpegTSInputExts[strings.ToLower(filepath.Ext(inputPath))]
+
 	if videoInfo != nil && len(videoInfo.AudioStreams) > 0 {
-		// Per-stream audio disposition: copy compatible, transcode others.
-		hasCompatible := false
-		for i, a := range videoInfo.AudioStreams {
-			if mp4CompatibleAudioCodecs[strings.ToLower(a.CodecName)] {
+		if forceAACReencode {
+			// MPEG-TS input: re-encode every audio stream to AAC to bypass
+			// the aac_adtstoasc bitstream filter, which fails fatally on
+			// corrupt ADTS headers commonly found in .ts captures.
+			for i := range videoInfo.AudioStreams {
 				args = append(args, "-map", fmt.Sprintf("0:a:%d", i))
-				hasCompatible = true
 			}
-		}
-		if hasCompatible {
-			args = append(args, "-c:a", "copy")
-		}
-		for i, a := range videoInfo.AudioStreams {
-			if !mp4CompatibleAudioCodecs[strings.ToLower(a.CodecName)] {
-				streamSpec := fmt.Sprintf("0:a:%d", i)
-				args = append(args, "-map", streamSpec)
-				args = append(args, fmt.Sprintf("-c:a:%d", i), "aac")
-			}
-		}
-		if !hasCompatible {
 			args = append(args, "-c:a", "aac")
+		} else {
+			// Per-stream audio disposition: copy compatible, transcode others.
+			hasCompatible := false
+			for i, a := range videoInfo.AudioStreams {
+				if mp4CompatibleAudioCodecs[strings.ToLower(a.CodecName)] {
+					args = append(args, "-map", fmt.Sprintf("0:a:%d", i))
+					hasCompatible = true
+				}
+			}
+			if hasCompatible {
+				args = append(args, "-c:a", "copy")
+			}
+			for i, a := range videoInfo.AudioStreams {
+				if !mp4CompatibleAudioCodecs[strings.ToLower(a.CodecName)] {
+					streamSpec := fmt.Sprintf("0:a:%d", i)
+					args = append(args, "-map", streamSpec)
+					args = append(args, fmt.Sprintf("-c:a:%d", i), "aac")
+				}
+			}
+			if !hasCompatible {
+				args = append(args, "-c:a", "aac")
+			}
 		}
 	} else {
-		args = append(args, "-map", "0:a?", "-c:a", "copy")
+		// No probed audio info: copy everything (or AAC re-encode for TS,
+		// since we can't know whether the audio is ADTS-AAC and copying
+		// would risk the same failure mode).
+		if forceAACReencode {
+			args = append(args, "-map", "0:a?", "-c:a", "aac")
+		} else {
+			args = append(args, "-map", "0:a?", "-c:a", "copy")
+		}
 	}
 
 	// Subtitles: copy only MP4-compatible text-based formats.
