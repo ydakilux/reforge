@@ -56,20 +56,20 @@ winres:  ## Generate Windows resource files (.syso) with icon and version info
 # ──────────────────────────────────────────────────────────────────
 # Build
 # ──────────────────────────────────────────────────────────────────
-build: $(WINRES_DEP)  ## Development build for current OS
-	go build -o $(BINARY_NAME) .
+build: $(WINRES_DEP)  ## Development build for current OS (stripped: smaller binary, faster AV scan on launch)
+	go build -ldflags="$(LDFLAGS)" -o $(BINARY_NAME) .
 
 build-windows: winres  ## Development build for Windows
-	GOOS=windows GOARCH=amd64 go build -o $(BINARY_WIN) .
+	GOOS=windows GOARCH=amd64 go build -ldflags="$(LDFLAGS)" -o $(BINARY_WIN) .
 
 build-linux:  ## Development build for Linux
-	GOOS=linux GOARCH=amd64 go build -o $(BINARY_LINUX) .
+	GOOS=linux GOARCH=amd64 go build -ldflags="$(LDFLAGS)" -o $(BINARY_LINUX) .
 
 build-darwin:  ## Development build for macOS
-	GOOS=darwin GOARCH=amd64 go build -o $(BINARY_DARWIN) .
+	GOOS=darwin GOARCH=amd64 go build -ldflags="$(LDFLAGS)" -o $(BINARY_DARWIN) .
 
 build-darwin-arm:  ## Development build for macOS Apple Silicon
-	GOOS=darwin GOARCH=arm64 go build -o $(BINARY_DARWIN)-arm64 .
+	GOOS=darwin GOARCH=arm64 go build -ldflags="$(LDFLAGS)" -o $(BINARY_DARWIN)-arm64 .
 
 build-all: build-windows build-linux build-darwin  ## Development build for all platforms
 

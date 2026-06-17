@@ -75,6 +75,13 @@ type ProducerConfig struct {
 	FFprobePath string // resolved ffprobe path (may be empty → resolves from ffmpeg dir)
 	Log         *logrus.Logger
 	GPUAssigner *pipeline.GPUAssigner
+	// RunID, when non-zero, is stamped onto every conversion record this
+	// producer writes (currently only the "already_hevc" prescan rows).
+	// Leaving it zero preserves the pre-runs behaviour of writing run_id
+	// NULL — but in that case the next launch's migration will synthesise a
+	// "legacy" run for these rows, so callers should always pass the
+	// current run id when one exists.
+	RunID int64
 	// OnFileFinished is called whenever a file is fully handled (converted,
 	// skipped, or errored) so external callers (e.g. the TUI) can update
 	// progress. sizeBytes is the original file size (0 if unknown). May be nil.
@@ -182,6 +189,7 @@ func Produce(files []string, fileToBaseDir map[string]string, pipe *pipeline.Pip
 					Width:           videoInfo.Width,
 					Height:          videoInfo.Height,
 					ConvertedAt:     time.Now().UTC().Format(time.RFC3339),
+					RunID:           cfg.RunID,
 				}); err != nil {
 					cfg.Log.Warnf("Failed to update already_hevc record for %s: %v", filePath, err)
 				}

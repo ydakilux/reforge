@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -75,6 +76,9 @@ type App struct {
 	pipelineCtrl    *pipeline.Controller
 	outputDrive     string          // "" = use source drive
 	gpuBenchmarks   map[int]float64 // gpuIndex → FPS (nil for single-GPU or CPU)
+	sourcePaths     []string        // paths actually processed (echoed in the final summary)
+	runID           int64           // id of the runs row created for this invocation (0 if not yet created)
+	runStartedAt    time.Time       // wall-clock start of this run (set when runID is created)
 }
 
 // New creates an App from parsed options and validates basic preconditions.
@@ -131,11 +135,13 @@ func (a *App) runSetupPhase() (setupResult, error) {
 	// walk only — no FFprobe) so we can show the total file size on the output-drive
 	// selection screen before the user picks a drive.
 	var preDiscoveredTotalBytes int64
+	preBytesPerDrive := make(map[string]int64)
 	if len(a.opts.Paths) > 0 {
 		preFiles, _ := discovery.DiscoverFiles(a.opts.Paths, a.config.FileExtensions, a.log)
 		for _, f := range preFiles {
 			if info, err := os.Stat(f); err == nil {
 				preDiscoveredTotalBytes += info.Size()
+				preBytesPerDrive[fileutil.GetDriveRoot(f)] += info.Size()
 			}
 		}
 	}
@@ -151,6 +157,7 @@ func (a *App) runSetupPhase() (setupResult, error) {
 		NeedOutputDrive:    !a.opts.SameDrive,
 		AvailableDrives:    getAvailableDrives(),
 		TotalFileSizeBytes: preDiscoveredTotalBytes,
+		BytesPerDrive:      preBytesPerDrive,
 	}
 
 	var answersCh <-chan tui.SetupAnswers
@@ -234,6 +241,8 @@ func (a *App) runSetupPhase() (setupResult, error) {
 }
 
 func (a *App) runConversionPhase(sr setupResult) error {
+	a.sourcePaths = append(a.sourcePaths[:0], sr.paths...)
+
 	if a.logFlush != nil {
 		a.log, a.logCleanup = a.logFlush(a.config.Seq.ServerURL, a.config.Seq.APIKey, a.execDir, a.config.Seq.Enabled, a.ui.Writer())
 		a.logFlush = nil
@@ -250,6 +259,25 @@ func (a *App) runConversionPhase(sr setupResult) error {
 	defer store.Close()
 	a.store = store
 	a.stats.TouchedDrives = make(map[string]bool)
+
+	// Create the run row up front so its id can be attached to every
+	// conversion record written by the converter. Failure to create the row
+	// is non-fatal: we log and continue with runID=0 (records remain
+	// orphan, just like in the pre-runs era).
+	a.runStartedAt = time.Now().UTC()
+	runID, runErr := a.store.CreateRun(context.Background(), database.RunInfo{
+		StartedAt:     a.runStartedAt.Format(time.RFC3339),
+		SourcePaths:   sr.paths,
+		OutputDrive:   a.outputDrive,
+		Encoder:       a.config.VideoEncoder,
+		QualityPreset: a.config.QualityPreset,
+		ParallelJobs:  a.config.MaxParallelJobs,
+	})
+	if runErr != nil {
+		a.log.Warnf("Failed to create run row (records will not be grouped): %v", runErr)
+	} else {
+		a.runID = runID
+	}
 
 	a.log.Info("Discovering files...")
 	files, fileToBaseDir := discovery.DiscoverFiles(sr.paths, a.config.FileExtensions, a.log)
@@ -309,6 +337,7 @@ func (a *App) runConversionPhase(sr setupResult) error {
 		Ctrl:                a.pipelineCtrl,
 		OutputDriveOverride: a.outputDrive,
 		Log:                 a.log,
+		RunID:               a.runID,
 	}
 
 	a.pipeline.Start(func(ctx context.Context, job types.Job) pipeline.ConversionResult {
@@ -326,6 +355,7 @@ func (a *App) runConversionPhase(sr setupResult) error {
 			Stats:       &a.stats,
 			Log:         a.log,
 			GPUAssigner: gpuAssigner,
+			RunID:       a.runID,
 			OnFileFinished: func(sizeBytes int64) {
 				a.ui.FileFinished(sizeBytes)
 			},
@@ -336,7 +366,31 @@ func (a *App) runConversionPhase(sr setupResult) error {
 		a.ui.FileFinished(result.Job.OriginalSize)
 	}
 
+	a.finalizeRun()
+
 	return nil
+}
+
+// finalizeRun writes the end timestamp and aggregate counters onto the run row
+// created at the start of runConversionPhase. Safe to call when runID == 0
+// (no-op) or when the store is unavailable (logs and returns).
+func (a *App) finalizeRun() {
+	if a.runID == 0 || a.store == nil {
+		return
+	}
+	a.stats.Mu.Lock()
+	stats := database.RunStats{
+		EndedAt:        time.Now().UTC().Format(time.RFC3339),
+		FileCount:      a.stats.FilesProcessed,
+		OriginalBytes:  a.stats.OriginalBytes,
+		ConvertedBytes: a.stats.FinalBytes,
+		ErrorCount:     a.stats.FilesErrored,
+		NotBeneficial:  a.stats.FilesDiscarded,
+	}
+	a.stats.Mu.Unlock()
+	if err := a.store.FinalizeRun(context.Background(), a.runID, stats); err != nil {
+		a.log.Warnf("Failed to finalize run %d: %v", a.runID, err)
+	}
 }
 
 func (a *App) runSummaryPhase() {
@@ -683,6 +737,13 @@ func (a *App) buildStatsSummary(elapsed time.Duration) []string {
 		)
 	}
 
+	// Echo source and destination paths so the user can verify them at a
+	// glance before pressing Enter to dismiss the TUI.
+	if pathLines := a.buildPathsSummary("  "); len(pathLines) > 0 {
+		lines = append(lines, "  ─────────────────────────────────────")
+		lines = append(lines, pathLines...)
+	}
+
 	lines = append(lines, "")
 	return lines
 }
@@ -726,7 +787,68 @@ func (a *App) buildStatsSummaryBox(elapsed time.Duration) []string {
 		"╚════════════════════════════════════════════════════════════════╝",
 		"",
 	)
+
+	// Echo source and destination paths after the box so users can verify
+	// where files came from and went to. Kept outside the fixed-width box
+	// because real-world paths can easily exceed the box's inner width.
+	if pathLines := a.buildPathsSummary(""); len(pathLines) > 0 {
+		lines = append(lines, pathLines...)
+		lines = append(lines, "")
+	}
 	return lines
+}
+
+// buildPathsSummary returns human-readable "Source" and "Destination" sections
+// for the final summary. Each output line is prefixed with indent. Returns nil
+// when there is nothing meaningful to show (e.g. no source paths recorded).
+func (a *App) buildPathsSummary(indent string) []string {
+	if len(a.sourcePaths) == 0 {
+		return nil
+	}
+
+	var lines []string
+	if len(a.sourcePaths) == 1 {
+		lines = append(lines, indent+"Source path:")
+	} else {
+		lines = append(lines, fmt.Sprintf("%sSource paths (%d):", indent, len(a.sourcePaths)))
+	}
+	for _, p := range a.sourcePaths {
+		lines = append(lines, indent+"  • "+p)
+	}
+
+	dests := a.destinationPaths()
+	if len(dests) > 0 {
+		if len(dests) == 1 {
+			lines = append(lines, indent+"Destination:")
+		} else {
+			lines = append(lines, fmt.Sprintf("%sDestinations (%d):", indent, len(dests)))
+		}
+		for _, d := range dests {
+			lines = append(lines, indent+"  • "+d)
+		}
+	}
+	return lines
+}
+
+// destinationPaths returns the resolved REFORGED output folders for this run.
+// When the user picked an explicit output drive, that single drive's REFORGED
+// folder is returned. Otherwise the REFORGED folder on each touched source
+// drive is returned, sorted for stable display.
+func (a *App) destinationPaths() []string {
+	if a.outputDrive != "" {
+		return []string{filepath.Join(a.outputDrive, converter.OutputDirName)}
+	}
+	a.stats.Mu.Lock()
+	defer a.stats.Mu.Unlock()
+	if len(a.stats.TouchedDrives) == 0 {
+		return nil
+	}
+	dests := make([]string, 0, len(a.stats.TouchedDrives))
+	for drive := range a.stats.TouchedDrives {
+		dests = append(dests, filepath.Join(drive, converter.OutputDirName))
+	}
+	sort.Strings(dests)
+	return dests
 }
 
 // ── interactive prompt helpers ─────────────────────────────────────────────────

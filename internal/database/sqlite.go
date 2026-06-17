@@ -32,6 +32,10 @@ func NewSQLiteStore(dbPath string, logger *logrus.Logger) (*SQLiteStore, error) 
 		db.Close()
 		return nil, fmt.Errorf("create schema: %w", err)
 	}
+	if err := migrateSchema(ctx, db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate schema: %w", err)
+	}
 
 	return &SQLiteStore{db: db, logger: logger}, nil
 }
@@ -96,13 +100,14 @@ func (s *SQLiteStore) UpdateRecord(ctx context.Context, driveRoot, fileHash stri
 		INSERT OR REPLACE INTO conversions
 			(file_hash, drive_root, source_path, original_size, converted_size,
 			 output_path, note, error, source_codec, source_container,
-			 width, height, duration_secs, converted_at, conversion_duration_secs)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 width, height, duration_secs, converted_at, conversion_duration_secs, run_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		fileHash, driveRoot, nullString(rec.SourcePath), rec.OriginalSize, nullInt64(rec.ConvertedSize),
 		nullString(rec.Output), nullString(rec.Note), nullString(rec.Error),
 		nullString(rec.SourceCodec), nullString(rec.SourceContainer),
 		nullInt64(int64(rec.Width)), nullInt64(int64(rec.Height)), nullFloat64(rec.DurationSecs),
 		nullString(rec.ConvertedAt), nullFloat64(rec.ConversionDurationSecs),
+		nullInt64(rec.RunID),
 	)
 	if err != nil {
 		return fmt.Errorf("upsert record: %w", err)

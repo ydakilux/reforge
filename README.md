@@ -11,6 +11,7 @@ A high-performance CLI batch video conversion tool for Windows that converts vid
 - **🚀 Concurrent Processing** - Producer-consumer pipeline for efficient batch operations
 - **📊 Detailed Reporting** - Per-file conversion statistics with size comparisons
 - **🔍 Query Subcommands** - Built-in `stats`, `errors`, `recent`, `not-beneficial`, `formats`, `space-saved`, `dashboard`
+- **📜 Runs Browser** - Run with no arguments to open an interactive menu; the **Recent runs** entry opens a two-pane browser grouping every conversion into the run that produced it
 - **🎯 Quality Presets** - Configurable quality settings (high_quality, balanced, space_saver)
 - **📁 Directory Preservation** - Maintains folder structure from dropped directory onwards
 - **🧹 Smart Output** - Only creates directories when conversions succeed
@@ -136,6 +137,17 @@ reforge.exe [flags] <directory>
 | `--non-interactive` | `false` | Disable interactive prompts (auto-fallback to CPU on GPU failure) |
 | `--rebenchmark` | `false` | Force GPU benchmark even if cached results exist |
 | `--db-path` | `conversions.db` (next to exe) | Path to SQLite conversion database |
+
+### Interactive Menu
+
+Running `reforge.exe` with no arguments opens an interactive launcher menu instead of starting a conversion. From the menu you can:
+
+- **Start conversion** — fall through to the normal conversion flow
+- **Recent runs** — open the two-pane runs browser (Tab to switch pane, PgUp/PgDn to scroll, Esc to return)
+- **Stats / Errors / Recent / Not beneficial / Formats / Space saved / Dashboard** — same output as the subcommands below, rendered into a scrollable viewport
+- **Quit**
+
+The menu loops until you pick *Start conversion* or *Quit*, so you can browse multiple reports without re-launching the binary. Passing any CLI argument (a path, `--flag`, or a subcommand name) bypasses the menu.
 
 ### Subcommands
 

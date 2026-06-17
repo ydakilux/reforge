@@ -8,6 +8,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Runs database** — every conversion invocation creates a row in a new `runs` SQL table; every `conversions` record now carries a `run_id` linking it back. Legacy databases are auto-migrated by clustering existing records on `converted_at` (>10 min gap = new run) into synthesised runs tagged `note='legacy'`.
+- **Interactive launcher menu** — running `reforge.exe` with no arguments drops into a Bubble Tea menu: Start conversion, Recent runs, stats, errors, recent, not-beneficial, formats, space-saved, dashboard, quit. Stats render into a scrollable viewport; any key returns to the menu.
+- **Recent runs browser** — two-pane interactive view of all runs. Left pane lists runs newest-first with size totals; right pane shows the selected run's meta (timestamps, encoder, output drive, source paths, stats) plus the full file list. Tab toggles focus, PgUp/PgDn scrolls, Esc returns.
+- **Destination-drive space warning** — setup TUI raises a warning step when the chosen output drive's free space is less than the worst-case bytes that will be written there. Suppressed when no risk is detected.
+- **Source/destination echo in summary** — the final TUI summary echoes resolved source paths and destination folders so users can verify them before dismissing the screen.
+- Store interface: `CreateRun`, `FinalizeRun`, `GetRuns`, `GetRunFiles` methods plus `RunInfo`, `RunStats`, `RunSummary`, `RunFileRecord` types.
+
+### Changed
+- Subcommand handlers in `internal/app/subcommands.go` extracted into reusable `Render*` functions (`RenderStats`, `RenderErrors`, `RenderRecent`, `RenderNotBeneficial`, `RenderFormats`, `RenderSpaceSaved`) so the launcher can render them into a viewport instead of duplicating SQL.
+- `types.Record` gains `RunID int64` (`json:"run_id,omitempty"`); records with `RunID == 0` are written verbatim (orphan rows from prescan or pre-runs era).
+
+### Fixed
+- Runs browser: View targets `m.height - 1` rows so the bottom row stays free for bubbletea's cursor / alt-screen reset. Writing the full height scrolled the viewport on the next render and left stale lines (duplicate scroll indicators visible simultaneously when crossing the meta-to-files boundary).
+- Runs browser: pre-rendered ANSI markers (`runsStyleSelected.Render("❯ ")`) are no longer embedded inside another `style.Render` call. Nested ANSI made lipgloss miscount the visible line width and wrap inside the pane, overflowing the pane height.
+- Runs browser: `Errors:` stat line now colours only the integer value, fixing the mis-indentation of the following `Original:` line caused by the ANSI reset interacting with subsequent plain text.
+- Runs browser: `truncate` is visible-cell-width aware (uses `lipgloss.Width`) so multi-byte runes (→, …, ✓, ✗, ·) no longer push file rows past the pane's content width.
+- Runs browser: Up/Down/PgUp/PgDn/Home/End move only the scroll viewport; the separate file-cursor that fought the manual scroll position (snapping the viewport back to the cursor after PgDn) is gone.
+
 ---
 
 ## [0.9.1] - 2026-04-14

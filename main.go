@@ -44,6 +44,13 @@ func main() {
 			app.RunDashboard(os.Args[2:])
 			return
 		}
+	} else {
+		// No arguments at all: show the interactive launcher menu. The user
+		// can either pick a stats view (loops until they quit) or "Start
+		// conversion", which falls through to the regular conversion flow.
+		if app.RunLauncher() == app.LauncherQuit {
+			return
+		}
 	}
 
 	// Default: existing conversion flow

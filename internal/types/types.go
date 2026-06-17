@@ -53,6 +53,11 @@ type Record struct {
 	DurationSecs           float64 `json:"duration_secs,omitempty"`
 	ConvertedAt            string  `json:"converted_at,omitempty"`
 	ConversionDurationSecs float64 `json:"conversion_duration_secs,omitempty"`
+
+	// RunID associates this record with a row in the runs table. Zero means
+	// "not part of a run" (e.g. discovery prescan or legacy data prior to
+	// the runs feature). When non-zero it is persisted as conversions.run_id.
+	RunID int64 `json:"run_id,omitempty"`
 }
 
 // Job represents a conversion job

@@ -22,6 +22,8 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/ydakilux/reforge/internal/fileutil"
 )
 
 // ── Startup phase messages ────────────────────────────────────────────────────
@@ -82,6 +84,12 @@ type SetupOptions struct {
 	// When non-zero it is shown in the output-drive selection step so the
 	// user knows how much space is needed on the target drive.
 	TotalFileSizeBytes int64
+	// BytesPerDrive maps each source drive root to the total bytes of matching
+	// video files on that drive. Used by the destination-full warning when the
+	// user keeps the source drive(s) as output. May be nil when sources come
+	// from the interactive folder picker — in that case the scan populates the
+	// equivalent map at confirm time.
+	BytesPerDrive map[string]int64
 }
 
 // SetupAnswers carries the values collected during setup.
@@ -109,6 +117,7 @@ const (
 	stepForceHevc
 	stepParallelJobs
 	stepOutputDrive
+	stepDriveSpaceWarn
 	stepDone
 )
 
@@ -116,8 +125,9 @@ const (
 type confirmScan struct {
 	totalDirs      int
 	totalFiles     int
-	totalSizeBytes int64    // sum of sizes of matching video files
-	baseDirs       []string // unique root paths the user added
+	totalSizeBytes int64            // sum of sizes of matching video files
+	baseDirs       []string         // unique root paths the user added
+	bytesPerDrive  map[string]int64 // total matching bytes grouped by drive root
 }
 
 type setupModel struct {
@@ -159,8 +169,21 @@ type setupModel struct {
 	driveYesAsked  bool
 	driveWantsDiff bool
 
+	// stepDriveSpaceWarn — populated when we detect the destination(s) may run
+	// out of space. Empty slice means no warning is needed and the step is
+	// skipped automatically.
+	spaceRisks []driveSpaceRisk
+
 	width  int
 	height int
+}
+
+// driveSpaceRisk describes a destination drive whose free space is less than
+// the worst-case bytes that will be written to it.
+type driveSpaceRisk struct {
+	root      string // e.g. "D:\"
+	freeBytes int64  // available bytes on the drive
+	needBytes int64  // worst-case bytes to be written (= source bytes routed here)
 }
 
 func newSetupModel(opts SetupOptions) setupModel {
@@ -257,6 +280,10 @@ func (m *setupModel) nextStepAfter(s setupStep) setupStep {
 			if m.opts.NeedOutputDrive {
 				return next
 			}
+		case stepDriveSpaceWarn:
+			if len(m.spaceRisks) > 0 {
+				return next
+			}
 		}
 	}
 	return stepDone
@@ -318,6 +345,8 @@ func (m setupModel) update(msg tea.Msg) (setupModel, tea.Cmd) {
 			return m.updateStepParallelJobs(msg)
 		case stepOutputDrive:
 			return m.updateStepOutputDrive(msg)
+		case stepDriveSpaceWarn:
+			return m.updateStepDriveSpaceWarn(msg)
 		}
 	}
 
@@ -421,7 +450,26 @@ func (m *setupModel) chromeLineCount() int {
 
 // advance moves to the next needed step.
 func (m *setupModel) advance() {
+	prev := m.step
 	m.step = m.nextStepAfter(m.step)
+
+	// Compute destination space risks at the moment the output-drive choice
+	// is finalised. This is either when leaving stepOutputDrive itself, or
+	// when the output-drive step is skipped entirely (e.g. --same-drive on
+	// the CLI) and we cross over it during a transition. Recomputing here —
+	// rather than earlier — ensures the warning reflects the drive the user
+	// just picked, even when revisiting the choice after a "back".
+	crossedOutputDrive := prev <= stepOutputDrive && m.step > stepOutputDrive
+	if crossedOutputDrive {
+		m.spaceRisks = m.computeSpaceRisks(m.answers.OutputDrive)
+		// nextStepAfter ran before we populated spaceRisks, so it may have
+		// skipped stepDriveSpaceWarn. Re-evaluate: if risks now exist and the
+		// previous decision landed past the warn step, redirect there.
+		if len(m.spaceRisks) > 0 && m.step > stepDriveSpaceWarn {
+			m.step = stepDriveSpaceWarn
+		}
+	}
+
 	if m.step == stepParallelJobs {
 		m.ti.Focus()
 	}
@@ -520,7 +568,7 @@ func scanPaths(paths []string, extensions []string) confirmScan {
 	matchAll := len(extSet) == 0
 
 	seen := make(map[string]bool)
-	sc := confirmScan{}
+	sc := confirmScan{bytesPerDrive: make(map[string]int64)}
 
 	for _, root := range paths {
 		root = filepath.Clean(root)
@@ -541,6 +589,7 @@ func scanPaths(paths []string, extensions []string) confirmScan {
 			if matchAll || extSet[ext] {
 				sc.totalFiles++
 				sc.totalSizeBytes += info.Size()
+				sc.bytesPerDrive[fileutil.GetDriveRoot(root)] += info.Size()
 			}
 			continue
 		}
@@ -562,6 +611,7 @@ func scanPaths(paths []string, extensions []string) confirmScan {
 			if matchAll || extSet[ext] {
 				sc.totalFiles++
 				sc.totalSizeBytes += fi.Size()
+				sc.bytesPerDrive[fileutil.GetDriveRoot(p)] += fi.Size()
 			}
 			return nil
 		})
@@ -586,8 +636,9 @@ var (
 	setupStyleCursor            = lipgloss.NewStyle().Foreground(lipgloss.Color("#7C3AED")).Bold(true)
 	setupStyleDriveNormal       = lipgloss.NewStyle().Foreground(lipgloss.Color("#E5E7EB"))
 	setupStyleDriveSelected     = lipgloss.NewStyle().Foreground(lipgloss.Color("#7C3AED")).Bold(true)
-	setupStyleDriveEnough       = lipgloss.NewStyle().Foreground(lipgloss.Color("#22C55E")) // green — enough free space
-	setupStyleDriveInsufficient = lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444")) // red — not enough space
+	setupStyleDriveEnough       = lipgloss.NewStyle().Foreground(lipgloss.Color("#22C55E"))            // green — enough free space
+	setupStyleDriveInsufficient = lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444"))            // red — not enough space
+	setupStyleWarn              = lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B")).Bold(true) // amber — warning
 	setupStyleStartupLine       = lipgloss.NewStyle().Foreground(lipgloss.Color("#E5E7EB"))
 	setupStyleStartupDim        = lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
 	setupStyleSpinner           = lipgloss.NewStyle().Foreground(lipgloss.Color("#A78BFA")).Bold(true)
@@ -619,6 +670,8 @@ func (m setupModel) view() string {
 		b.WriteString(m.viewStepParallelJobs())
 	case stepOutputDrive:
 		b.WriteString(m.viewStepOutputDrive(w))
+	case stepDriveSpaceWarn:
+		b.WriteString(m.viewStepDriveSpaceWarn(w))
 	}
 
 	return setupStyleBorder.Width(w).MaxHeight(m.height).Render(b.String()) + "\n"

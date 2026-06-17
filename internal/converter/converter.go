@@ -45,6 +45,9 @@ type Converter struct {
 	Ctrl                *pipeline.Controller
 	OutputDriveOverride string
 	Log                 *logrus.Logger
+	// RunID, when non-zero, is stamped onto every conversion record this
+	// converter writes so they can be grouped under a single run row.
+	RunID int64
 }
 
 // Process converts a single job. It is safe to call from multiple goroutines.
@@ -161,6 +164,7 @@ func (c *Converter) Process(ctx context.Context, job types.Job, dryRun bool) {
 			Height:          job.Height,
 			DurationSecs:    job.DurationSeconds,
 			ConvertedAt:     time.Now().UTC().Format(time.RFC3339),
+			RunID:           c.RunID,
 		}); err != nil {
 			c.Log.Errorf("Failed to update error record for %s: %v", job.FilePath, err)
 		}
@@ -219,6 +223,7 @@ func (c *Converter) Process(ctx context.Context, job types.Job, dryRun bool) {
 			DurationSecs:           job.DurationSeconds,
 			ConvertedAt:            time.Now().UTC().Format(time.RFC3339),
 			ConversionDurationSecs: time.Since(convStart).Seconds(),
+			RunID:                  c.RunID,
 		}); err != nil {
 			c.Log.Errorf("Failed to update record for %s: %v", job.FilePath, err)
 		}
@@ -248,6 +253,7 @@ func (c *Converter) Process(ctx context.Context, job types.Job, dryRun bool) {
 			DurationSecs:           job.DurationSeconds,
 			ConvertedAt:            time.Now().UTC().Format(time.RFC3339),
 			ConversionDurationSecs: time.Since(convStart).Seconds(),
+			RunID:                  c.RunID,
 		}); err != nil {
 			c.Log.Errorf("Failed to update record for %s: %v", job.FilePath, err)
 		}

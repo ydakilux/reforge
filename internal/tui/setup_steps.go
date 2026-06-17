@@ -1,12 +1,15 @@
 package tui
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/ydakilux/reforge/internal/fileutil"
 )
 
 func (m setupModel) updateStepStartup(msg tea.KeyMsg) (setupModel, tea.Cmd) {
@@ -117,6 +120,133 @@ func (m setupModel) updateStepOutputDrive(msg tea.KeyMsg) (setupModel, tea.Cmd) 
 		return m, nil
 	}
 	return m, nil
+}
+
+// updateStepDriveSpaceWarn handles the "destination may be full" confirmation.
+// Y/Enter proceeds; N/Backspace returns to the drive selection step; Esc/Ctrl+C
+// cancels setup.
+func (m setupModel) updateStepDriveSpaceWarn(msg tea.KeyMsg) (setupModel, tea.Cmd) {
+	switch strings.ToLower(msg.String()) {
+	case "y", "enter":
+		// User accepted the risk — clear risks so nextStepAfter skips this step
+		// from now on, and advance to stepDone.
+		m.spaceRisks = nil
+		m.step = stepDone
+		return m, nil
+	case "n", "backspace", "b":
+		// Re-open drive selection so the user can pick another drive.
+		if m.opts.NeedOutputDrive {
+			m.spaceRisks = nil
+			m.driveYesAsked = false
+			m.driveWantsDiff = false
+			m.answers.OutputDrive = ""
+			m.step = stepOutputDrive
+			return m, nil
+		}
+		// No drive selection available — treat as cancel.
+		m.answers.Cancelled = true
+		m.step = stepDone
+		return m, nil
+	case "ctrl+c", "esc":
+		m.answers.Cancelled = true
+		m.step = stepDone
+		return m, nil
+	}
+	return m, nil
+}
+
+// computeSpaceRisks returns the list of destination drives whose free space is
+// strictly less than the worst-case bytes that would be written to them.
+//
+// outputDrive == "" means "keep source drives" — risks are computed per source
+// drive against its own files' total bytes.
+// outputDrive != "" means everything is routed to that single drive — risk is
+// computed against the sum of all source bytes.
+//
+// Worst-case assumption: converted output is the same size as the source. HEVC
+// usually shrinks files, so the warning is conservative.
+func (m *setupModel) computeSpaceRisks(outputDrive string) []driveSpaceRisk {
+	bytesPerDrive := m.scan.bytesPerDrive
+	if len(bytesPerDrive) == 0 {
+		bytesPerDrive = m.opts.BytesPerDrive
+	}
+
+	// Build root → freeBytes map from AvailableDrives (case-insensitive on
+	// Windows where the same root may differ in casing between sources).
+	freeByRoot := make(map[string]int64, len(m.opts.AvailableDrives))
+	for _, d := range m.opts.AvailableDrives {
+		freeByRoot[strings.ToUpper(filepath.Clean(d.Root))] = d.FreeBytes
+	}
+	lookupFree := func(root string) (int64, bool) {
+		v, ok := freeByRoot[strings.ToUpper(filepath.Clean(root))]
+		return v, ok && v > 0
+	}
+
+	var risks []driveSpaceRisk
+
+	if outputDrive == "" {
+		// Per-drive check against bytes-on-that-drive.
+		for root, need := range bytesPerDrive {
+			if need <= 0 {
+				continue
+			}
+			free, ok := lookupFree(root)
+			if !ok {
+				continue // unknown free space — don't warn
+			}
+			if free < need {
+				risks = append(risks, driveSpaceRisk{root: root, freeBytes: free, needBytes: need})
+			}
+		}
+		return risks
+	}
+
+	// Single destination drive — sum all source bytes.
+	totalNeed := m.scan.totalSizeBytes
+	if totalNeed == 0 {
+		totalNeed = m.opts.TotalFileSizeBytes
+	}
+	if totalNeed <= 0 {
+		return nil
+	}
+	free, ok := lookupFree(outputDrive)
+	if !ok {
+		return nil
+	}
+	if free < totalNeed {
+		risks = append(risks, driveSpaceRisk{root: outputDrive, freeBytes: free, needBytes: totalNeed})
+	}
+	return risks
+}
+
+// viewStepDriveSpaceWarn renders the "destination may be full" confirmation.
+func (m setupModel) viewStepDriveSpaceWarn(w int) string {
+	var b strings.Builder
+	b.WriteString(m.renderAnsweredAbove())
+	b.WriteString(setupStyleWarn.Render("⚠  Destination may run out of space") + "\n\n")
+
+	if m.answers.OutputDrive == "" {
+		b.WriteString(setupStyleHint.Render("  You chose to keep the source drive(s) as output.") + "\n")
+	} else {
+		b.WriteString(setupStyleHint.Render(fmt.Sprintf("  Output drive: %s", m.answers.OutputDrive)) + "\n")
+	}
+	b.WriteString(setupStyleHint.Render("  Worst-case estimate assumes converted files are the same size as the source.") + "\n")
+	b.WriteString(setupStyleHint.Render("  HEVC output is usually smaller, but this is not guaranteed.") + "\n\n")
+
+	for _, r := range m.spaceRisks {
+		short := fmt.Sprintf("  %s  free %s   need up to %s   shortfall %s",
+			r.root,
+			fileutil.FormatBytes(r.freeBytes),
+			fileutil.FormatBytes(r.needBytes),
+			fileutil.FormatBytes(r.needBytes-r.freeBytes),
+		)
+		b.WriteString(setupStyleDriveInsufficient.Render(short) + "\n")
+	}
+
+	b.WriteString("\n")
+	b.WriteString(setupStyleHint.Render("  Proceed anyway?") + "\n")
+	b.WriteString(setupStyleHint.Render("  [y] Yes — proceed   [n / Backspace] Back to drive selection   [Esc] cancel") + "\n")
+	return b.String()
 }
 
 func (m setupModel) updateStepFolder(msg tea.Msg) (setupModel, tea.Cmd) {
