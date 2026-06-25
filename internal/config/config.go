@@ -117,7 +117,7 @@ func migrate(cfg *types.Config, raw []byte) bool {
 // should have. New entries added here are automatically migrated into old
 // config files on next load.
 func defaultExtensions() []string {
-	return []string{".MOV", ".AVI", ".MKV", ".MP4", ".WMV", ".M4V", ".FLV", ".F4V", ".MPG", ".ASF", ".TS", ".M2TS", ".VID"}
+	return []string{".MOV", ".AVI", ".MKV", ".MP4", ".WMV", ".M4V", ".FLV", ".F4V", ".MPG", ".ASF", ".TS", ".M2TS", ".VID", ".WEBM"}
 }
 
 // containsExt reports whether ext (case-insensitive) is in list.

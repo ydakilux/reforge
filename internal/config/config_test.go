@@ -117,8 +117,8 @@ func TestCreateDefaultConfigCreatesFile(t *testing.T) {
 	if cfg.LogLevel != "INFO" {
 		t.Errorf("LogLevel = %q, want %q", cfg.LogLevel, "INFO")
 	}
-	if len(cfg.FileExtensions) != 13 {
-		t.Errorf("FileExtensions len = %d, want 13", len(cfg.FileExtensions))
+	if len(cfg.FileExtensions) != 14 {
+		t.Errorf("FileExtensions len = %d, want 14", len(cfg.FileExtensions))
 	}
 
 	// Verify file is valid JSON that round-trips
