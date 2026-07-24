@@ -46,6 +46,18 @@ func waitStartupLine(ch <-chan string) tea.Cmd {
 	}
 }
 
+type msgAvailableDrives []DriveInfo
+
+func waitDrives(ch <-chan []DriveInfo) tea.Cmd {
+	return func() tea.Msg {
+		drives, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return msgAvailableDrives(drives)
+	}
+}
+
 // ── Public types ──────────────────────────────────────────────────────────────
 
 // DriveInfo describes one available output drive.
@@ -62,6 +74,9 @@ type SetupOptions struct {
 	// questions.  The app sends progress lines (e.g. "Detecting GPU…"); closing
 	// the channel signals that startup work is complete and questions can begin.
 	StartupCh <-chan string
+
+	// DrivesCh receives detected drive info asynchronously in the background.
+	DrivesCh <-chan []DriveInfo
 
 	// NeedFolder: true when no path was given on the CLI.
 	NeedFolder bool
@@ -290,19 +305,26 @@ func (m *setupModel) nextStepAfter(s setupStep) setupStep {
 }
 
 func (m setupModel) init() tea.Cmd {
-	if m.step == stepStartup && m.opts.StartupCh != nil {
-		return waitStartupLine(m.opts.StartupCh)
+	var cmds []tea.Cmd
+	if m.opts.DrivesCh != nil {
+		cmds = append(cmds, waitDrives(m.opts.DrivesCh))
 	}
-	if m.step == stepFolder {
+	if m.step == stepStartup && m.opts.StartupCh != nil {
+		cmds = append(cmds, waitStartupLine(m.opts.StartupCh))
+	} else if m.step == stepFolder {
 		// Height is set in newSetupModel (safe default = 12); WindowSizeMsg
 		// will update it once the terminal size is known.
-		return m.fp.Init()
+		cmds = append(cmds, m.fp.Init())
 	}
-	return nil
+	return tea.Batch(cmds...)
 }
 
 func (m setupModel) update(msg tea.Msg) (setupModel, tea.Cmd) {
 	switch msg := msg.(type) {
+	case msgAvailableDrives:
+		m.opts.AvailableDrives = []DriveInfo(msg)
+		return m, nil
+
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height

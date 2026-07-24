@@ -36,7 +36,7 @@ endif
 # ──────────────────────────────────────────────────────────────────
 # Default target
 # ──────────────────────────────────────────────────────────────────
-.DEFAULT_GOAL := all
+.DEFAULT_GOAL := help
 
 .PHONY: all \
         build build-windows build-linux build-darwin build-all \
@@ -182,5 +182,9 @@ download-sample:  ## Download Big Buck Bunny sample video (interactive)
 # Help
 # ──────────────────────────────────────────────────────────────────
 help:  ## Print available targets with descriptions
+ifeq ($(OS),Windows_NT)
+	@powershell -NoProfile -Command "Get-Content $(MAKEFILE_LIST) | Where-Object { $$_ -match '^[a-zA-Z0-9_-]+:.*?## ' } | ForEach-Object { $$p = $$_ -split ':.*?## '; '{0,-26} {1}' -f $$p[0].Trim(), $$p[1].Trim() }"
+else
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
 	  | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-28s %s\n", $$1, $$2}'
+endif

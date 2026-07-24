@@ -28,8 +28,13 @@ func processAlive(cmd *exec.Cmd) bool {
 	if err != nil {
 		return false
 	}
-	syscall.CloseHandle(handle)
-	return true
+	defer syscall.CloseHandle(handle)
+
+	var exitCode uint32
+	if err := syscall.GetExitCodeProcess(handle, &exitCode); err == nil {
+		return exitCode == 259 // 259 = STILL_ACTIVE
+	}
+	return false
 }
 
 func TestSuspendResumeProcess(t *testing.T) {

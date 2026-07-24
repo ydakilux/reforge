@@ -3,10 +3,10 @@
     "d885394847b264d9ec86e5995da3cf72": {
       "encoder": "hevc_nvenc",
       "gpu_index": 0,
-      "fps": 227.01475595913737,
-      "speed_x": 7.567158531971246,
-      "wall_clock_ms": 2643,
-      "timestamp": "2026-05-24T18:24:49.9824764+02:00",
+      "fps": 385.60411311053986,
+      "speed_x": 12.853470437017995,
+      "wall_clock_ms": 1556,
+      "timestamp": "2026-07-19T07:10:55.5740784+02:00",
       "cache_key": "d885394847b264d9ec86e5995da3cf72"
     }
   },
@@ -14,52 +14,52 @@
     "dbfa338767282f0dd0fe52d3f5b9db19": {
       "encoder": "hevc_nvenc",
       "best_parallelism": 4,
-      "best_fps": 259.6559558584875,
+      "best_fps": 492.7119687949086,
       "runs": {
         "1": {
           "encoder": "hevc_nvenc",
           "gpu_index": 0,
-          "fps": 237.2479240806643,
-          "speed_x": 7.908264136022143,
-          "wall_clock_ms": 2529,
-          "timestamp": "2026-05-24T18:24:52.5151565+02:00",
+          "fps": 414.0786749482401,
+          "speed_x": 13.80262249827467,
+          "wall_clock_ms": 1449,
+          "timestamp": "2026-07-19T07:10:57.0237765+02:00",
           "cache_key": ""
         },
         "2": {
           "encoder": "hevc_nvenc",
           "gpu_index": 0,
-          "fps": 252.25982762245116,
-          "speed_x": 8.408660920748371,
-          "wall_clock_ms": 4757,
-          "timestamp": "2026-05-24T18:24:57.2727809+02:00",
+          "fps": 471.6981132075472,
+          "speed_x": 15.723270440251573,
+          "wall_clock_ms": 2544,
+          "timestamp": "2026-07-19T07:10:59.568772+02:00",
           "cache_key": ""
         },
         "3": {
           "encoder": "hevc_nvenc",
           "gpu_index": 0,
-          "fps": 258.3237657864523,
-          "speed_x": 8.610792192881744,
-          "wall_clock_ms": 6968,
-          "timestamp": "2026-05-24T18:25:04.2417616+02:00",
+          "fps": 482.44438488340927,
+          "speed_x": 16.08147949611364,
+          "wall_clock_ms": 3731,
+          "timestamp": "2026-07-19T07:11:03.3007289+02:00",
           "cache_key": ""
         },
         "4": {
           "encoder": "hevc_nvenc",
           "gpu_index": 0,
-          "fps": 259.6559558584875,
-          "speed_x": 8.65519852861625,
-          "wall_clock_ms": 9243,
-          "timestamp": "2026-05-24T18:25:13.4863557+02:00",
+          "fps": 492.7119687949086,
+          "speed_x": 16.42373229316362,
+          "wall_clock_ms": 4871,
+          "timestamp": "2026-07-19T07:11:08.1723303+02:00",
           "cache_key": ""
         }
       },
-      "timestamp": "2026-05-24T18:24:49.9856254+02:00",
+      "timestamp": "2026-07-19T07:10:55.5740784+02:00",
       "cache_key": "dbfa338767282f0dd0fe52d3f5b9db19"
     }
   },
   "detection": {
     "best_encoder": "hevc_nvenc",
-    "timestamp": "2026-06-15T10:36:13.3260358+02:00"
+    "timestamp": "2026-07-19T07:10:06.2516182+02:00"
   },
   "version": "1"
 }

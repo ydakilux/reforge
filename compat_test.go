@@ -142,8 +142,12 @@ func TestBackwardCompatAutoEncoder(t *testing.T) {
 			if err != nil {
 				t.Fatalf("LoadConfig with encoder=%q must succeed: %v", tc.encoder, err)
 			}
-			if loaded.VideoEncoder != tc.encoder {
-				t.Errorf("VideoEncoder = %q, want %q", loaded.VideoEncoder, tc.encoder)
+			want := tc.encoder
+			if want == "" {
+				want = "auto"
+			}
+			if loaded.VideoEncoder != want {
+				t.Errorf("VideoEncoder = %q, want %q", loaded.VideoEncoder, want)
 			}
 		})
 	}

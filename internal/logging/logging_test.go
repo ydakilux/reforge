@@ -31,10 +31,11 @@ func setupTestLoggerWithParams(t *testing.T, serverURL, apiKey, logLevel string)
 
 func TestSimpleFormatterOutputsMessageAndNewlineOnly(t *testing.T) {
 	f := &SimpleFormatter{}
+	testTime := time.Date(2025, 1, 1, 12, 34, 56, 123000000, time.UTC)
 	entry := &logrus.Entry{
 		Message: "hello world",
 		Level:   logrus.InfoLevel,
-		Time:    time.Now(),
+		Time:    testTime,
 		Data:    logrus.Fields{"key": "value"},
 	}
 
@@ -43,13 +44,13 @@ func TestSimpleFormatterOutputsMessageAndNewlineOnly(t *testing.T) {
 		t.Fatalf("Format returned error: %v", err)
 	}
 
-	expected := "hello world\n"
+	expected := "[12:34:56.123] hello world\n"
 	if string(out) != expected {
 		t.Errorf("expected %q, got %q", expected, string(out))
 	}
 }
 
-func TestSimpleFormatterExcludesLevelAndTimestamp(t *testing.T) {
+func TestSimpleFormatterExcludesLevel(t *testing.T) {
 	f := &SimpleFormatter{}
 	entry := &logrus.Entry{
 		Message: "test message",
@@ -65,9 +66,6 @@ func TestSimpleFormatterExcludesLevelAndTimestamp(t *testing.T) {
 	result := string(out)
 	if strings.Contains(result, "error") || strings.Contains(result, "ERROR") {
 		t.Error("output should not contain log level")
-	}
-	if strings.Contains(result, "2025") {
-		t.Error("output should not contain timestamp")
 	}
 }
 

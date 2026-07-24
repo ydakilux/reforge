@@ -114,9 +114,15 @@ func (a *App) runSetupPhase() (setupResult, error) {
 		return setupResult{}, err
 	}
 
-	a.log, a.logFlush = logging.SetupEarlyLogging(a.config.LogLevel)
+	a.log, a.logFlush = logging.SetupEarlyLogging(a.config.LogLevel, a.execDir)
 
+	setupStart := time.Now()
+	a.log.Info("Initializing setup phase...")
+
+	resStart := time.Now()
 	ffmpegExe := cfgpkg.ResolveExecutable(a.config.FFmpegPath, cfgpkg.ExeName("ffmpeg"), a.execDir)
+	a.log.Infof("Resolved FFmpeg executable: %q (%v elapsed)", ffmpegExe, time.Since(resStart))
+
 	if ffmpegExe == "" {
 		if err := a.promptInstallFFmpeg(); err != nil {
 			return setupResult{}, err
@@ -125,8 +131,24 @@ func (a *App) runSetupPhase() (setupResult, error) {
 
 	a.fbManager = fallback.NewFallbackManager(!a.config.NonInteractive, os.Stdin, a.log)
 
+	encStart := time.Now()
+	a.log.Infof("Selecting video encoder (config setting: %s)...", a.config.VideoEncoder)
 	if err := a.selectEncoder(ffmpegExe); err != nil {
 		return setupResult{}, err
+	}
+	a.log.Infof("Encoder selection complete (%v elapsed)", time.Since(encStart))
+
+	// Pre-load cached benchmark recommendation so the TUI displays the true recommended parallel job count.
+	if cache, err := benchmark.LoadCache(a.configFilePath); err == nil && cache != nil {
+		parallelKey := benchmark.ParallelCacheKey(a.config.VideoEncoder)
+		if benchmark.IsParallelCacheValid(cache, parallelKey) {
+			if cached, ok := cache.ParallelResults[parallelKey]; ok && cached.BestParallelism > 0 {
+				if a.config.MaxParallelJobs <= 1 {
+					a.config.MaxParallelJobs = cached.BestParallelism
+					a.log.Infof("Loaded benchmark recommendation: %d parallel job(s) for %s", cached.BestParallelism, a.config.VideoEncoder)
+				}
+			}
+		}
 	}
 
 	startupCh := make(chan string, 16)
@@ -137,6 +159,8 @@ func (a *App) runSetupPhase() (setupResult, error) {
 	var preDiscoveredTotalBytes int64
 	preBytesPerDrive := make(map[string]int64)
 	if len(a.opts.Paths) > 0 {
+		discStart := time.Now()
+		a.log.Infof("Running pre-discovery scan on %d path(s)...", len(a.opts.Paths))
 		preFiles, _ := discovery.DiscoverFiles(a.opts.Paths, a.config.FileExtensions, a.log)
 		for _, f := range preFiles {
 			if info, err := os.Stat(f); err == nil {
@@ -144,10 +168,15 @@ func (a *App) runSetupPhase() (setupResult, error) {
 				preBytesPerDrive[fileutil.GetDriveRoot(f)] += info.Size()
 			}
 		}
+		a.log.Infof("Pre-discovery complete: %d file(s), %d bytes (%v elapsed)", len(preFiles), preDiscoveredTotalBytes, time.Since(discStart))
 	}
+	a.log.Infof("Setup phase initialized in %v", time.Since(setupStart))
+
+	drivesCh := make(chan []tui.DriveInfo, 1)
 
 	setupOpts := tui.SetupOptions{
 		StartupCh:          startupCh,
+		DrivesCh:           drivesCh,
 		NeedFolder:         len(a.opts.Paths) == 0,
 		VideoExtensions:    a.config.FileExtensions,
 		NeedBypass:         !a.opts.Bypass,
@@ -155,13 +184,14 @@ func (a *App) runSetupPhase() (setupResult, error) {
 		NeedParallelJobs:   a.opts.ParallelJobs == 0,
 		DefaultParallel:    a.config.MaxParallelJobs,
 		NeedOutputDrive:    !a.opts.SameDrive,
-		AvailableDrives:    getAvailableDrives(),
 		TotalFileSizeBytes: preDiscoveredTotalBytes,
 		BytesPerDrive:      preBytesPerDrive,
 	}
 
 	var answersCh <-chan tui.SetupAnswers
 
+	tuiInitStart := time.Now()
+	a.log.Info("Initializing TUI interface...")
 	a.ui, answersCh = tui.New(setupOpts, func(action tui.ControlAction) {
 		if a.pipelineCtrl == nil {
 			return
@@ -186,10 +216,18 @@ func (a *App) runSetupPhase() (setupResult, error) {
 			a.ui.SendControlState(false, tui.StopKindNow)
 		}
 	})
+	a.log.Infof("TUI interface initialized (%v elapsed)", time.Since(tuiInitStart))
 
 	startupErrCh := make(chan error, 1)
 	go func() {
 		defer close(startupCh)
+		defer close(drivesCh)
+
+		driveStart := time.Now()
+		a.log.Info("Detecting available drives asynchronously...")
+		drives := getAvailableDrives()
+		drivesCh <- drives
+		a.log.Infof("Drive detection complete: %d drive(s) found (%v elapsed)", len(drives), time.Since(driveStart))
 
 		startupCh <- fmt.Sprintf("Encoder: %s", a.config.VideoEncoder)
 
@@ -201,7 +239,11 @@ func (a *App) runSetupPhase() (setupResult, error) {
 		startupErrCh <- nil
 	}()
 
+	tuiWaitStart := time.Now()
+	a.log.Info("Rendering setup UI form and awaiting user input...")
+
 	answers := <-answersCh
+	a.log.Infof("Setup UI form completed by user (%v elapsed)", time.Since(tuiWaitStart))
 	if answers.Cancelled {
 		a.ui.Wait()
 		go func() { <-startupErrCh }()
@@ -533,8 +575,38 @@ func (a *App) selectEncoder(ffmpegExe string) error {
 		}
 	}
 
+	if requestedEncoder == "auto" {
+		a.proposeFixEncoder(a.config.VideoEncoder)
+	}
+
 	a.log.Infof("Selected encoder: %s", a.config.VideoEncoder)
 	return nil
+}
+
+func (a *App) proposeFixEncoder(bestEncoder string) {
+	if a.config.NonInteractive {
+		return
+	}
+
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintf(os.Stderr, "VideoEncoder is currently set to \"auto\". Auto-detected best encoder: %s\n", bestEncoder)
+	fmt.Fprintf(os.Stderr, "Fixing \"video_encoder\": %q in your config file will speed up application startup on future runs.\n", bestEncoder)
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintf(os.Stderr, "Save %q as your default video_encoder in %s? [Y/n] ", bestEncoder, filepath.Base(a.configFilePath))
+
+	scanner := bufio.NewScanner(os.Stdin)
+	if !scanner.Scan() {
+		return
+	}
+	answer := strings.TrimSpace(strings.ToLower(scanner.Text()))
+	if answer == "" || answer == "y" || answer == "yes" {
+		a.config.VideoEncoder = bestEncoder
+		if err := cfgpkg.SaveConfig(a.configFilePath, a.config); err != nil {
+			a.log.Warnf("Failed to update config file: %v", err)
+		} else {
+			a.log.Infof("Saved video_encoder: %s to %s", bestEncoder, a.configFilePath)
+		}
+	}
 }
 
 func (a *App) confirmCPUFallback() error {

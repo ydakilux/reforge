@@ -102,8 +102,8 @@ func TestCreateDefaultConfigCreatesFile(t *testing.T) {
 	if cfg.Seq.ServerURL != "http://localhost:5341/" {
 		t.Errorf("Seq.ServerURL = %q, want %q", cfg.Seq.ServerURL, "http://localhost:5341/")
 	}
-	if cfg.VideoEncoder != "hevc_nvenc" {
-		t.Errorf("VideoEncoder = %q, want %q", cfg.VideoEncoder, "hevc_nvenc")
+	if cfg.VideoEncoder != "auto" {
+		t.Errorf("VideoEncoder = %q, want %q", cfg.VideoEncoder, "auto")
 	}
 	if cfg.QualityPreset != "balanced" {
 		t.Errorf("QualityPreset = %q, want %q", cfg.QualityPreset, "balanced")
@@ -148,8 +148,8 @@ func TestLoadConfigCreatesDefaultWhenMissing(t *testing.T) {
 	if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
 		t.Fatal("config file was not created")
 	}
-	if cfg.VideoEncoder != "hevc_nvenc" {
-		t.Errorf("VideoEncoder = %q, want %q", cfg.VideoEncoder, "hevc_nvenc")
+	if cfg.VideoEncoder != "auto" {
+		t.Errorf("VideoEncoder = %q, want %q", cfg.VideoEncoder, "auto")
 	}
 }
 

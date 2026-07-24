@@ -51,6 +51,9 @@ func LoadConfig(path string) (types.Config, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return types.Config{}, err
 	}
+	if cfg.VideoEncoder == "" {
+		cfg.VideoEncoder = "auto"
+	}
 	if err := ValidateEncoder(cfg.VideoEncoder); err != nil {
 		return types.Config{}, err
 	}
@@ -146,7 +149,7 @@ func CreateDefaultConfig(path string) (types.Config, error) {
 		FFmpegPath:         defaultFFmpegPath(),
 		FFprobePath:        "",
 		TempDirectory:      "",
-		VideoEncoder:       "hevc_nvenc",
+		VideoEncoder:       "auto",
 		QualityPreset:      "balanced",
 		CustomQualitySD:    0,
 		CustomQuality720p:  0,
@@ -177,6 +180,11 @@ func defaultFFmpegPath() string {
 		return `ffmpeg\bin\ffmpeg.exe`
 	}
 	return "" // rely on PATH: ffmpeg
+}
+
+// SaveConfig serialises cfg to path atomically (write to .tmp then rename).
+func SaveConfig(path string, cfg types.Config) error {
+	return writeConfig(path, cfg)
 }
 
 // writeConfig serialises cfg to path atomically (write to .tmp then rename).

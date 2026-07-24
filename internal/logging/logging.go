@@ -17,12 +17,13 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// SimpleFormatter outputs only the log message without level or other metadata
+// SimpleFormatter outputs log messages prefixed with timestamp: [15:04:05.000] message
 type SimpleFormatter struct{}
 
-// Format renders a log entry as its bare message followed by a newline.
+// Format renders a log entry with a timestamp header followed by the message.
 func (f *SimpleFormatter) Format(entry *logrus.Entry) ([]byte, error) {
-	return []byte(entry.Message + "\n"), nil
+	timestamp := entry.Time.Format("15:04:05.000")
+	return []byte(fmt.Sprintf("[%s] %s\n", timestamp, entry.Message)), nil
 }
 
 // SeqHook sends logs to Seq
@@ -192,10 +193,33 @@ func SetupLogging(serverURL, apiKey, logLevel, execDir string, seqEnabled bool, 
 //
 // This avoids the "double log file" problem that arises when SetupLogging is
 // called twice: once before the TUI starts (plain stdout) and once after.
-func SetupEarlyLogging(logLevel string) (*logrus.Logger, func(serverURL, apiKey, execDir string, seqEnabled bool, consoleWriter io.Writer) (*logrus.Logger, func())) {
+func SetupEarlyLogging(logLevel string, execDir ...string) (*logrus.Logger, func(serverURL, apiKey, execDir string, seqEnabled bool, consoleWriter io.Writer) (*logrus.Logger, func())) {
 	buf := &bufferWriter{}
 	early := logrus.New()
-	early.SetOutput(io.MultiWriter(os.Stderr, buf))
+
+	var earlyLogFile *os.File
+	dir := ""
+	if len(execDir) > 0 {
+		dir = execDir[0]
+	}
+	if dir != "" {
+		logsDir := filepath.Join(dir, "logs")
+		if err := os.MkdirAll(logsDir, 0755); err == nil {
+			logFileName := fmt.Sprintf("reforge_%s.log", time.Now().Format("2006-01-02_15-04-05"))
+			logFilePath := filepath.Join(logsDir, logFileName)
+			if f, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
+				earlyLogFile = f
+			}
+		}
+	}
+
+	var writers []io.Writer
+	writers = append(writers, os.Stderr, buf)
+	if earlyLogFile != nil {
+		writers = append(writers, earlyLogFile)
+	}
+
+	early.SetOutput(io.MultiWriter(writers...))
 	early.SetFormatter(&SimpleFormatter{})
 	level, err := logrus.ParseLevel(logLevel)
 	if err != nil {
@@ -204,12 +228,13 @@ func SetupEarlyLogging(logLevel string) (*logrus.Logger, func(serverURL, apiKey,
 	early.SetLevel(level)
 
 	flush := func(serverURL, apiKey, execDir string, seqEnabled bool, consoleWriter io.Writer) (*logrus.Logger, func()) {
-		// Redirect early logger to discard so any lingering calls are silent.
 		early.SetOutput(io.Discard)
+		if earlyLogFile != nil {
+			earlyLogFile.Close()
+		}
 
 		real, cleanup := SetupLogging(serverURL, apiKey, logLevel, execDir, seqEnabled, consoleWriter)
 
-		// Replay buffered early output into the real logger's output writer.
 		if mw, ok := real.Out.(io.Writer); ok {
 			if err := buf.Flush(mw); err != nil {
 				real.Warnf("Failed to flush early log buffer: %v", err)
