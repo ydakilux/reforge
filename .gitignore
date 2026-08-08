@@ -53,6 +53,8 @@ MediaInfo*/
 converted_files.json
 *_converted_files.json
 conversions.db
+conversions.db-wal
+conversions.db-shm
 benchmark_cache.json
 
 # Generated dashboard
