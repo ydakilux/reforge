@@ -34,6 +34,11 @@ import (
 // MaxParallelJobsCap is the hard upper bound on concurrent conversion jobs.
 const MaxParallelJobsCap = 8
 
+// AppVersion is set by main.go at startup via the version variable injected
+// by -ldflags. It is exposed here so TUI components can display it without
+// requiring the version to be threaded through every function signature.
+var AppVersion = "0.9.1"
+
 // Options holds the parsed CLI flags.
 type Options struct {
 	ConfigFile     string
@@ -554,6 +559,9 @@ func (a *App) selectEncoder(ffmpegExe string) error {
 		if candidate, found := a.encoderRegistry.Get(a.config.VideoEncoder); found {
 			if !candidate.IsAvailable(ffmpegExe) {
 				a.log.Warnf("Configured encoder %q is not available on this system", a.config.VideoEncoder)
+				// Probe the actual reason so we can surface a helpful hint.
+				// Run the trial encode stderr through ParseError to get a specific message.
+				a.log.Warnf("Hint: if you are using FFmpeg 9, NVIDIA driver ≥ 610 is required for NVENC (API 13.1)")
 				a.config.VideoEncoder = "libx265"
 				fellBackToCPU = true
 			}
@@ -617,6 +625,14 @@ func (a *App) confirmCPUFallback() error {
 
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "No GPU encoder is available on this system.")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "  Possible causes:")
+	fmt.Fprintln(os.Stderr, "    • FFmpeg 9 requires NVIDIA driver ≥ 610 (NVENC API 13.1)")
+	fmt.Fprintln(os.Stderr, "      Check your driver version: nvidia-smi")
+	fmt.Fprintln(os.Stderr, "      Download: https://www.nvidia.com/Download/index.aspx")
+	fmt.Fprintln(os.Stderr, "    • No compatible GPU is present or the driver is not installed")
+	fmt.Fprintln(os.Stderr, "    • Running inside WSL without CUDA-on-WSL driver support")
+	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "CPU encoding (libx265) will be used instead. This is significantly slower.")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprint(os.Stderr, "Continue with CPU encoding? [Y/n] ")

@@ -75,7 +75,31 @@ func Run(ctx context.Context, ffmpegExe string, args []string, filePath string, 
 	stderrDone := make(chan struct{})
 	go func() {
 		defer close(stderrDone)
-		stderrBuf.ReadFrom(stderr)
+		errScanner := bufio.NewScanner(stderr)
+		corruptErrorCount := 0
+		killed := false
+		for errScanner.Scan() {
+			line := errScanner.Text()
+			stderrBuf.WriteString(line)
+			stderrBuf.WriteByte('\n')
+
+			if !killed {
+				lower := strings.ToLower(line)
+				if strings.Contains(lower, "invalid nal unit size") ||
+					strings.Contains(lower, "error splitting the input into nal units") ||
+					strings.Contains(lower, "error submitting packet to decoder") ||
+					strings.Contains(lower, "corrupt input packet") {
+					corruptErrorCount++
+					if corruptErrorCount >= 2 {
+						if logger != nil {
+							logger.Errorf("Corrupt stream detected in %s — stopping conversion immediately to skip file", filePath)
+						}
+						killed = true
+						killProcess(cmd)
+					}
+				}
+			}
+		}
 	}()
 
 	lastPct := -1

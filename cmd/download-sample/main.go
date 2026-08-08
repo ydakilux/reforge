@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"bufio"
 	"fmt"
 	"io"
@@ -17,17 +18,18 @@ const testdataDir = "testdata"
 type sample struct {
 	label string
 	url   string
-	file  string
+	file  string // local filename (may be .zip for full movies)
 	size  string
+	isZip bool // true → download zip, extract .mov, delete zip
 }
 
 var clips = []sample{
-	{"360p  10s clip", "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/360/Big_Buck_Bunny_360_10s_5MB.mp4", "Big_Buck_Bunny_360_10s.mp4", "~5 MB"},
-	{"720p  10s clip", "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_5MB.mp4", "Big_Buck_Bunny_720_10s.mp4", "~5 MB"},
-	{"1080p 10s clip", "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/1080/Big_Buck_Bunny_1080_10s_5MB.mp4", "Big_Buck_Bunny_1080_10s.mp4", "~5 MB"},
-	{"480p  full movie", "https://download.blender.org/peach/bigbuckbunny_movies/big_buck_bunny_480p_h264.mov", "big_buck_bunny_480p.mov", "~238 MB"},
-	{"720p  full movie", "https://download.blender.org/peach/bigbuckbunny_movies/big_buck_bunny_720p_h264.mov", "big_buck_bunny_720p.mov", "~397 MB"},
-	{"1080p full movie", "https://download.blender.org/peach/bigbuckbunny_movies/big_buck_bunny_1080p_h264.mov", "big_buck_bunny_1080p.mov", "~691 MB"},
+	{"360p  10s clip", "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/360/Big_Buck_Bunny_360_10s_5MB.mp4", "Big_Buck_Bunny_360_10s.mp4", "~5 MB", false},
+	{"720p  10s clip", "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_5MB.mp4", "Big_Buck_Bunny_720_10s.mp4", "~5 MB", false},
+	{"1080p 10s clip", "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/1080/Big_Buck_Bunny_1080_10s_5MB.mp4", "Big_Buck_Bunny_1080_10s.mp4", "~5 MB", false},
+	{"480p  full movie (zip ~238 MB)", "https://download.blender.org/peach/bigbuckbunny_movies/big_buck_bunny_480p_h264.mov.zip", "big_buck_bunny_480p.mov.zip", "~238 MB", true},
+	{"720p  full movie (zip ~397 MB)", "https://download.blender.org/peach/bigbuckbunny_movies/big_buck_bunny_720p_h264.mov.zip", "big_buck_bunny_720p.mov.zip", "~397 MB", true},
+	{"1080p full movie (zip ~692 MB)", "https://download.blender.org/peach/bigbuckbunny_movies/big_buck_bunny_1080p_h264.mov.zip", "big_buck_bunny_1080p.mov.zip", "~692 MB", true},
 }
 
 func main() {
@@ -82,9 +84,9 @@ func showMenuAndDownload() {
 		fmt.Printf("    %d) %-6s %s\n", i+1, c.size, c.file)
 	}
 	fmt.Println()
-	fmt.Println("  Full movie (~10 min, H.264):")
+	fmt.Println("  Full movie (~10 min, H.264, downloaded as .zip then extracted):")
 	for i, c := range clips[3:] {
-		fmt.Printf("    %d) %-6s %s\n", i+4, c.size, c.file)
+		fmt.Printf("    %d) %-8s %s\n", i+4, c.size, strings.TrimSuffix(c.file, ".zip"))
 	}
 	fmt.Println()
 
@@ -116,8 +118,21 @@ func showMenuAndDownload() {
 		os.Exit(1)
 	}
 
-	info, _ := os.Stat(dest)
-	fmt.Printf("\nSaved: %s (%.1f MB)\n", dest, float64(info.Size())/(1024*1024))
+	finalPath := dest
+	if chosen.isZip {
+		fmt.Println("\nExtracting zip ...")
+		extracted, err := unzip(dest, testdataDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Extraction failed: %v\n", err)
+			os.Exit(1)
+		}
+		_ = os.Remove(dest) // remove the zip after extraction
+		finalPath = extracted
+		fmt.Printf("Extracted: %s\n", finalPath)
+	}
+
+	info, _ := os.Stat(finalPath)
+	fmt.Printf("\nSaved: %s (%.1f MB)\n", finalPath, float64(info.Size())/(1024*1024))
 	fmt.Println()
 	fmt.Println("Usage:")
 	fmt.Printf("  reforge %s\n", testdataDir)
@@ -169,6 +184,70 @@ func download(url, dest string) error {
 	printProgress(written, total)
 	fmt.Println()
 	return nil
+}
+
+// unzip extracts the first file found in the zip archive into destDir and
+// returns the path of the extracted file.
+func unzip(zipPath, destDir string) (string, error) {
+	r, err := zip.OpenReader(zipPath)
+	if err != nil {
+		return "", fmt.Errorf("open zip %s: %w", zipPath, err)
+	}
+	defer r.Close()
+
+	for _, f := range r.File {
+		if f.FileInfo().IsDir() {
+			continue
+		}
+		outPath := filepath.Join(destDir, filepath.Base(f.Name))
+
+		rc, err := f.Open()
+		if err != nil {
+			return "", fmt.Errorf("open zip entry %s: %w", f.Name, err)
+		}
+
+		out, err := os.Create(outPath)
+		if err != nil {
+			rc.Close()
+			return "", fmt.Errorf("create %s: %w", outPath, err)
+		}
+
+		total := int64(f.UncompressedSize64)
+		written := int64(0)
+		buf := make([]byte, 64*1024)
+		lastPrint := time.Now()
+
+		for {
+			n, readErr := rc.Read(buf)
+			if n > 0 {
+				if _, wErr := out.Write(buf[:n]); wErr != nil {
+					rc.Close()
+					out.Close()
+					return "", fmt.Errorf("write: %w", wErr)
+				}
+				written += int64(n)
+				if time.Since(lastPrint) > 500*time.Millisecond {
+					printProgress(written, total)
+					lastPrint = time.Now()
+				}
+			}
+			if readErr == io.EOF {
+				break
+			}
+			if readErr != nil {
+				rc.Close()
+				out.Close()
+				return "", fmt.Errorf("read: %w", readErr)
+			}
+		}
+		printProgress(written, total)
+		fmt.Println()
+
+		rc.Close()
+		out.Close()
+		return outPath, nil
+	}
+	return "", fmt.Errorf("no files found in zip %s", zipPath)
 }
 
 func printProgress(written, total int64) {

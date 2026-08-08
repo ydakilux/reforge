@@ -15,6 +15,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Destination-drive space warning** — setup TUI raises a warning step when the chosen output drive's free space is less than the worst-case bytes that will be written there. Suppressed when no risk is detected.
 - **Source/destination echo in summary** — the final TUI summary echoes resolved source paths and destination folders so users can verify them before dismissing the screen.
 - Store interface: `CreateRun`, `FinalizeRun`, `GetRuns`, `GetRunFiles` methods plus `RunInfo`, `RunStats`, `RunSummary`, `RunFileRecord` types.
+- **FFmpeg 9 compatibility** — `hevc_nvenc` encoder error detection now recognises the new `nvenc sdk version X.Y is not supported` message emitted when FFmpeg 9 is used with an NVENC SDK older than 11.1. Error messages include a reminder to update NVIDIA drivers. `hevc_amf` encoder error detection now handles the `amf_dx11` and hardware memory mapping failure patterns introduced by FFmpeg 9's AMF enhancements.
 
 ### Changed
 - Subcommand handlers in `internal/app/subcommands.go` extracted into reusable `Render*` functions (`RenderStats`, `RenderErrors`, `RenderRecent`, `RenderNotBeneficial`, `RenderFormats`, `RenderSpaceSaved`) so the launcher can render them into a viewport instead of duplicating SQL.
@@ -28,6 +29,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Runs browser: Up/Down/PgUp/PgDn/Home/End move only the scroll viewport; the separate file-cursor that fought the manual scroll position (snapping the viewport back to the cursor after PgDn) is gone.
 
 ---
+
 
 ## [0.9.1] - 2026-04-14
 

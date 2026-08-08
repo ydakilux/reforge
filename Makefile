@@ -13,7 +13,13 @@ BINARY_DARWIN    := reforge-darwin
 BENCHMARK_WIN    := benchmark.exe
 BENCHMARK_LINUX  := benchmark-linux
 BENCHMARK_DARWIN := benchmark-darwin
-LDFLAGS          := -s -w
+# VERSION can be overridden on the command line: make build VERSION=1.2.3
+# Falls back to the current release tag. No sed/date required (Windows-compatible).
+VERSION          := $(shell git describe --tags --abbrev=0 2>nul || echo 0.9.1)
+VERSION          := $(patsubst v%,%,$(VERSION))
+COMMIT           := $(shell git rev-parse --short HEAD 2>nul || echo none)
+VERSION_LDFLAGS  := -X main.version=$(VERSION) -X main.commit=$(COMMIT)
+LDFLAGS          := -s -w $(VERSION_LDFLAGS)
 COVERAGE         := coverage.out
 
 # Native binary name — auto-detected from OS

@@ -79,6 +79,9 @@ func TestAmfParseError(t *testing.T) {
 		{"encoder_creation", "Encoder creation error", true, "AMF: encoder creation failed"},
 		{"amf_error", "amf error in encoding", true, "AMF: encoding error"},
 		{"amf_error_mixed_case", "AMF Error occurred", true, "AMF: encoding error"},
+		// FFmpeg 9: AMF hardware memory mapping errors
+		{"ffmpeg9_amf_dx11_error", "[hevc_amf @ 0x...] amf_dx11: device not found", true, "AMF: hardware memory mapping error (FFmpeg 9 feature — update AMD drivers)"},
+		{"ffmpeg9_amf_memory_mapping", "[hevc_amf @ 0x...] AMF memory mapping failed: device lost", true, "AMF: hardware memory mapping error (FFmpeg 9 feature — update AMD drivers)"},
 		{"normal_output", "normal output no issues", false, ""},
 		{"empty_stderr", "", false, ""},
 	}

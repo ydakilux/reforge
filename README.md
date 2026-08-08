@@ -80,7 +80,7 @@ When multiple NVIDIA GPUs are detected, the tool distributes encoding across the
 ## 📋 Requirements
 
 - **Windows 10/11** or **Linux / WSL2**
-- **FFmpeg** - Place in `ffmpeg\bin\` relative to exe, configure path in config, or install system-wide (`apt install ffmpeg`)
+- **FFmpeg** (≥ 6.0, **FFmpeg 9 recommended**) — Place in `ffmpeg\bin\` relative to exe, configure path in config, or install system-wide (`apt install ffmpeg`). Note: FFmpeg 9 requires **NVENC SDK ≥ 11.1** (NVIDIA driver ≥ 570) for GPU encoding; older drivers will fall back to CPU automatically.
 - **MediaInfo CLI** - Place in `MediaInfo_CLI_24.04_Windows_x64\` or configure path (`apt install mediainfo`)
 - **GPU** (optional) - NVIDIA, AMD, or Intel GPU for hardware-accelerated encoding. Falls back to CPU automatically if no GPU is available.
 
@@ -426,6 +426,24 @@ Or in config:
   "video_encoder": "libx265"
 }
 ```
+
+### FFmpeg 9: NVENC "sdk version not supported" error
+**Problem:** When using FFmpeg 9 with an older NVIDIA driver, you may see:
+```
+[hevc_nvenc] nvenc sdk version 10.0 is not supported
+```
+or
+```
+Driver does not support the required nvenc API version.
+```
+
+**Cause:** FFmpeg 9 dropped support for NVENC SDK versions older than 11.1 (requires NVIDIA driver ≥ 570).
+
+**Solution:**
+1. Update your NVIDIA driver to version **570 or newer** from the [NVIDIA driver download page](https://www.nvidia.com/Download/index.aspx).
+2. Or fall back to CPU encoding: `reforge.exe --encoder libx265 D:\Videos\`
+
+Reforge detects this error automatically and will offer the CPU fallback interactively.
 
 ### GPU benchmark is slow or stale
 **Problem:** First run takes extra time for benchmarking, or cached benchmark results are outdated.

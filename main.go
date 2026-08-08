@@ -11,16 +11,20 @@ import (
 )
 
 var (
-	version = "dev"
+	version = "0.9.1" // overridden at release time via -ldflags "-X main.version=x.y.z"
 	commit  = "none"
 	date    = "unknown"
 )
 
 func main() {
+	// Propagate the build-time version to the app package so TUI components
+	// can render it without needing it threaded through every call site.
+	app.AppVersion = version
+
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "version":
-			fmt.Printf("reforge %s (commit: %s, built: %s)\n", version, commit, date)
+			fmt.Printf("reforge v%s (commit: %s, built: %s)\n", version, commit, date)
 			return
 		case "stats":
 			app.RunStats(os.Args[2:])
@@ -67,6 +71,7 @@ func main() {
 		dbPath         = flag.String("db-path", "", "Path to SQLite database (default: conversions.db next to executable)")
 	)
 	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Reforge v%s — batch HEVC video converter\n\n", version)
 		fmt.Fprintf(os.Stderr, "Usage: %s [subcommand] [flags] [directory]\n\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "Subcommands:\n")
 		fmt.Fprintf(os.Stderr, "  version         Print version information\n")

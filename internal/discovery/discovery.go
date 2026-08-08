@@ -165,13 +165,35 @@ func Produce(files []string, fileToBaseDir map[string]string, pipe *pipeline.Pip
 
 			videoInfo, err := ffmpeg.GetMediaInfo(filePath, ffprobeExe)
 			if err != nil {
-				cfg.Log.Warnf("Failed to get video info for %s: %v", filePath, err)
+				cfg.Log.Errorf("Failed to get video info for %s: %v", filePath, err)
+				if cfg.DB != nil {
+					if dbErr := cfg.DB.UpdateRecord(context.Background(), driveRoot, fileHash, types.Record{
+						OriginalSize: info.Size(),
+						Error:        "probe_failed",
+						SourcePath:   filePath,
+						ConvertedAt:  time.Now().UTC().Format(time.RFC3339),
+						RunID:        cfg.RunID,
+					}); dbErr != nil {
+						cfg.Log.Errorf("Failed to update error record for %s: %v", filePath, dbErr)
+					}
+				}
 				cfg.Stats.IncrFilesErrored()
 				notifyFinished(info.Size())
 				continue
 			}
 			if videoInfo == nil {
-				cfg.Log.Warnf("No video track found in %s", filePath)
+				cfg.Log.Errorf("No video track found in %s", filePath)
+				if cfg.DB != nil {
+					if dbErr := cfg.DB.UpdateRecord(context.Background(), driveRoot, fileHash, types.Record{
+						OriginalSize: info.Size(),
+						Error:        "no_video_track",
+						SourcePath:   filePath,
+						ConvertedAt:  time.Now().UTC().Format(time.RFC3339),
+						RunID:        cfg.RunID,
+					}); dbErr != nil {
+						cfg.Log.Errorf("Failed to update error record for %s: %v", filePath, dbErr)
+					}
+				}
 				cfg.Stats.IncrFilesErrored()
 				notifyFinished(info.Size())
 				continue

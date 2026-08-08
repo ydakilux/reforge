@@ -16,6 +16,8 @@ package app
 import (
 	"context"
 	"fmt"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -70,9 +72,10 @@ type runsBrowserModel struct {
 
 	// files belong to the run at index loadedFor; when loadedFor != runCursor
 	// the right-pane file list is stale and a reload is required.
-	files     []database.RunFileRecord
-	filesErr  error
-	loadedFor int // -1 = nothing loaded
+	files            []database.RunFileRecord
+	filesErr         error
+	loadedFor        int // -1 = nothing loaded
+	collapsedFolders map[string]bool
 
 	// detailScroll is the first line of the right pane's rendered content
 	// that should appear at the top of the visible pane. Updated by the
@@ -88,9 +91,10 @@ type runsBrowserModel struct {
 
 func newRunsBrowserModel(store database.Store) runsBrowserModel {
 	return runsBrowserModel{
-		store:     store,
-		loadedFor: -1,
-		result:    runsBrowserBack,
+		store:            store,
+		loadedFor:        -1,
+		result:           runsBrowserBack,
+		collapsedFolders: make(map[string]bool),
 	}
 }
 
@@ -169,6 +173,7 @@ func (m runsBrowserModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loadedFor = m.runCursor
 		m.fileCursor = 0
 		m.detailScroll = 0
+		m.collapsedFolders = make(map[string]bool)
 		m.clampDetailScroll()
 		return m, nil
 
@@ -248,36 +253,78 @@ func (m runsBrowserModel) updateRunsPane(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.filesErr = nil
 		m.loadedFor = -1
 		m.detailScroll = 0
+		m.fileCursor = 0
+		m.collapsedFolders = make(map[string]bool)
 		return m, m.loadFilesFor(m.runCursor)
 	}
 	return m, nil
 }
 
 func (m runsBrowserModel) updateFilesPane(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// The right pane is a single scrollable viewport over the combined
-	// meta + file-list content. All movement keys scroll the viewport;
-	// fileCursor tracks the highlighted file row (the first file visible
-	// at the current scroll position) and is kept in sync below.
-	// There is no separate auto-scroll-to-cursor logic, so PgUp/PgDn and
-	// j/k/↑/↓ cannot fight each other.
+	groups, visibleItems := m.getVisibleItems()
+	numVisible := len(visibleItems)
+
+	if m.fileCursor >= numVisible {
+		m.fileCursor = numVisible - 1
+	}
+	if m.fileCursor < 0 {
+		m.fileCursor = 0
+	}
+
 	switch msg.String() {
 	case "up", "k":
-		if m.detailScroll > 0 {
-			m.detailScroll--
+		if m.fileCursor > 0 {
+			m.fileCursor--
 		}
 	case "down", "j":
-		m.detailScroll++ // clamped in clampDetailScroll
+		if m.fileCursor < numVisible-1 {
+			m.fileCursor++
+		}
 	case "home", "g":
-		m.detailScroll = 0
+		m.fileCursor = 0
 	case "end", "G":
-		m.detailScroll = 1 << 30 // clamped in clampDetailScroll to last page
+		if numVisible > 0 {
+			m.fileCursor = numVisible - 1
+		}
 	case "pgup":
-		m.detailScroll -= 10
-		if m.detailScroll < 0 {
-			m.detailScroll = 0
+		m.fileCursor -= 10
+		if m.fileCursor < 0 {
+			m.fileCursor = 0
 		}
 	case "pgdown":
-		m.detailScroll += 10 // clamped in clampDetailScroll
+		m.fileCursor += 10
+		if m.fileCursor >= numVisible {
+			if numVisible > 0 {
+				m.fileCursor = numVisible - 1
+			} else {
+				m.fileCursor = 0
+			}
+		}
+	case " ", "c", "e", "enter", "left", "right":
+		if numVisible > 0 && m.fileCursor < numVisible {
+			item := visibleItems[m.fileCursor]
+			folderName := item.folderName
+			if m.collapsedFolders == nil {
+				m.collapsedFolders = make(map[string]bool)
+			}
+			key := msg.String()
+			if key == "e" || key == "right" {
+				m.collapsedFolders[folderName] = false
+			} else if key == "c" || key == "left" {
+				m.collapsedFolders[folderName] = true
+			} else {
+				m.collapsedFolders[folderName] = !m.collapsedFolders[folderName]
+			}
+		}
+	case "C":
+		if m.collapsedFolders == nil {
+			m.collapsedFolders = make(map[string]bool)
+		}
+		for _, g := range groups {
+			m.collapsedFolders[g.Name] = true
+		}
+	case "E":
+		m.collapsedFolders = make(map[string]bool)
 	}
 	return m, nil
 }
@@ -322,7 +369,7 @@ func (m runsBrowserModel) View() string {
 	}
 
 	title := runsStyleTitle.Render("Reforge  —  Recent runs")
-	hint := runsStyleHint.Render("[↑/↓] move   [PgUp/PgDn] scroll   [Tab] switch pane   [Enter] reload   [Esc/q] back   [Ctrl+C] quit")
+	hint := runsStyleHint.Render("[↑/↓] move   [space/c/e] folder   [C/E] all   [Tab] switch pane   [Enter] reload   [Esc/q] back")
 
 	// Bubbletea's renderer expects the view to fit in (m.height - 1) rows so
 	// the bottom row is left for the cursor and the alt-screen reset; writing
@@ -587,7 +634,7 @@ func (m *runsBrowserModel) clampDetailScroll() {
 		return
 	}
 	w, h := m.detailViewport()
-	total, _ := m.detailContentLines(w)
+	total, cursorLine := m.detailContentLines(w)
 	viewH := h
 	if total > viewH {
 		viewH-- // matches renderDetail: one line reserved for the indicator
@@ -595,6 +642,14 @@ func (m *runsBrowserModel) clampDetailScroll() {
 			viewH = 1
 		}
 	}
+	if m.pane == paneFiles && cursorLine >= 0 {
+		if cursorLine < m.detailScroll {
+			m.detailScroll = cursorLine
+		} else if cursorLine >= m.detailScroll+viewH {
+			m.detailScroll = cursorLine - viewH + 1
+		}
+	}
+
 	maxScroll := total - viewH
 	if maxScroll < 0 {
 		maxScroll = 0
@@ -751,7 +806,7 @@ func (m runsBrowserModel) renderDetailFilesFull(w int) (string, int) {
 	var b strings.Builder
 	b.WriteString(runsStyleHeader.Render("Files"))
 	if m.pane == paneFiles {
-		b.WriteString(runsStyleHint.Render("  ← focused"))
+		b.WriteString(runsStyleHint.Render("  ← focused  [space/c/e] toggle  [C/E] all"))
 	} else {
 		b.WriteString(runsStyleHint.Render("  (Tab to focus)"))
 	}
@@ -770,50 +825,227 @@ func (m runsBrowserModel) renderDetailFilesFull(w int) (string, int) {
 		return b.String(), -1
 	}
 
-	// Header took 1 line. File rows start at line 1 (0-indexed within this
-	// section). Track which absolute line the highlighted file lands on.
-	cursorLine := -1
-	for i, f := range m.files {
-		isHighlighted := i == m.fileCursor && m.pane == paneFiles
-		style := runsStyleDim
-		if isHighlighted {
-			style = runsStyleSelected
-			cursorLine = 1 + i // +1 for the "Files" header line
-		}
-		name := f.SourcePath
-		if name == "" {
-			name = f.FileHash
-		}
-		status := "✓"
-		if f.Error != "" {
-			status = "✗"
-			style = runsStyleError
-		} else if f.Note == "not_beneficial" {
-			status = "·"
-		}
-		// Build the prefix separately from the name so that the pre-rendered
-		// ANSI marker is NOT embedded inside the outer style.Render() call.
-		// Embedding pre-rendered ANSI inside another Render call causes
-		// lipgloss to miscount the visual width and overflow the box.
-		prefix := "  "
-		if isHighlighted {
-			prefix = "❯ "
-		}
-		size := fmt.Sprintf("%s → %s", formatBytes(f.OriginalSize), formatBytes(f.ConvertedSize))
-		// Reserve enough columns for prefix(2) + status(1) + 2 separators(4) +
-		// the size string. Truncate name to fill what's left, then truncate
-		// the assembled line one more time as a hard cap so a long size
-		// suffix can never push the visible width past w.
-		fixed := lipgloss.Width(prefix) + lipgloss.Width(status) + 4 + lipgloss.Width(size)
-		nameBudget := w - fixed
-		if nameBudget < 4 {
-			nameBudget = 4
-		}
-		line := fmt.Sprintf("%s%s  %s  %s", prefix, status, truncate(name, nameBudget), size)
-		line = truncate(line, w)
-		b.WriteString(style.Render(line) + "\n")
+	groups, visibleItems := m.getVisibleItems()
+	if len(visibleItems) == 0 {
+		b.WriteString(runsStyleDim.Render("  No files visible."))
+		return b.String(), -1
 	}
+
+	cursorLine := -1
+	currentLine := 1
+
+	for i, item := range visibleItems {
+		isHighlighted := i == m.fileCursor && m.pane == paneFiles
+		if isHighlighted {
+			cursorLine = currentLine
+		}
+
+		if item.isFolder {
+			g := groups[item.folderIdx]
+			collapsed := m.collapsedFolders[g.Name]
+			icon := "▼"
+			if collapsed {
+				icon = "▶"
+			}
+
+			prefix := "  "
+			style := runsStyleHeader
+			if isHighlighted {
+				prefix = "❯ "
+				style = runsStyleSelected
+			}
+
+			sizeSummary := ""
+			if g.TotalOriginalBytes > 0 {
+				sizeSummary = fmt.Sprintf("%s → %s", formatBytes(g.TotalOriginalBytes), formatBytes(g.TotalConvertedBytes))
+			}
+
+			var info string
+			if sizeSummary != "" {
+				info = fmt.Sprintf("(%d file(s), %s)", g.FileCount, sizeSummary)
+			} else {
+				info = fmt.Sprintf("(%d file(s))", g.FileCount)
+			}
+
+			line := fmt.Sprintf("%s%s 📁 %s  %s", prefix, icon, g.Name, runsStyleDim.Render(info))
+			line = truncate(line, w)
+			b.WriteString(style.Render(line) + "\n")
+		} else {
+			f := m.files[item.fileIndex]
+			style := runsStyleDim
+			if isHighlighted {
+				style = runsStyleSelected
+			}
+
+			name := filepath.Base(f.SourcePath)
+			if name == "" || name == "." {
+				name = f.FileHash
+			}
+
+			status := "✓"
+			if f.Error != "" {
+				status = "✗"
+				style = runsStyleError
+			} else if f.Note == "not_beneficial" {
+				status = "·"
+			}
+
+			prefix := "    "
+			if isHighlighted {
+				prefix = "  ❯ "
+			}
+
+			size := fmt.Sprintf("%s → %s", formatBytes(f.OriginalSize), formatBytes(f.ConvertedSize))
+			fixed := lipgloss.Width(prefix) + lipgloss.Width(status) + 4 + lipgloss.Width(size)
+			nameBudget := w - fixed
+			if nameBudget < 4 {
+				nameBudget = 4
+			}
+			line := fmt.Sprintf("%s%s  %s  %s", prefix, status, truncate(name, nameBudget), size)
+			line = truncate(line, w)
+			b.WriteString(style.Render(line) + "\n")
+		}
+
+		currentLine++
+	}
+
 	return b.String(), cursorLine
+}
+
+type folderGroup struct {
+	Name                string
+	FullPath            string
+	FileIndices         []int
+	TotalOriginalBytes  int64
+	TotalConvertedBytes int64
+	FileCount           int
+}
+
+type visibleItem struct {
+	isFolder   bool
+	folderName string
+	fileIndex  int
+	folderIdx  int
+}
+
+func (m runsBrowserModel) getFolderGroups() []folderGroup {
+	if len(m.files) == 0 {
+		return nil
+	}
+	var sourcePaths []string
+	if m.runCursor >= 0 && m.runCursor < len(m.runs) {
+		sourcePaths = m.runs[m.runCursor].SourcePaths
+	}
+	return groupFilesByFolder(m.files, sourcePaths)
+}
+
+func (m runsBrowserModel) getVisibleItems() ([]folderGroup, []visibleItem) {
+	groups := m.getFolderGroups()
+	if len(groups) == 0 {
+		return nil, nil
+	}
+	var items []visibleItem
+	for gIdx, g := range groups {
+		items = append(items, visibleItem{
+			isFolder:   true,
+			folderName: g.Name,
+			fileIndex:  -1,
+			folderIdx:  gIdx,
+		})
+		if !m.collapsedFolders[g.Name] {
+			for _, fIdx := range g.FileIndices {
+				items = append(items, visibleItem{
+					isFolder:   false,
+					folderName: g.Name,
+					fileIndex:  fIdx,
+					folderIdx:  gIdx,
+				})
+			}
+		}
+	}
+	return groups, items
+}
+
+func groupFilesByFolder(files []database.RunFileRecord, sourcePaths []string) []folderGroup {
+	if len(files) == 0 {
+		return nil
+	}
+
+	cleanSources := make([]string, len(sourcePaths))
+	for i, sp := range sourcePaths {
+		cleanSources[i] = filepath.Clean(sp)
+	}
+
+	groupMap := make(map[string]int)
+	var groups []folderGroup
+
+	for i, f := range files {
+		if f.SourcePath == "" {
+			key := "(no path)"
+			idx, ok := groupMap[key]
+			if !ok {
+				idx = len(groups)
+				groupMap[key] = idx
+				groups = append(groups, folderGroup{Name: key, FullPath: ""})
+			}
+			groups[idx].FileIndices = append(groups[idx].FileIndices, i)
+			groups[idx].TotalOriginalBytes += f.OriginalSize
+			groups[idx].TotalConvertedBytes += f.ConvertedSize
+			groups[idx].FileCount++
+			continue
+		}
+
+		dir := filepath.Dir(f.SourcePath)
+		cleanDir := filepath.Clean(dir)
+		folderKey := ""
+
+		bestMatch := ""
+		for _, sp := range cleanSources {
+			if strings.HasPrefix(strings.ToLower(cleanDir), strings.ToLower(sp)) {
+				if len(sp) > len(bestMatch) {
+					bestMatch = sp
+				}
+			}
+		}
+
+		if bestMatch != "" {
+			rel, err := filepath.Rel(bestMatch, cleanDir)
+			if err == nil && rel != "" {
+				folderKey = rel
+			} else {
+				folderKey = filepath.Base(bestMatch)
+			}
+		} else {
+			folderKey = filepath.Base(cleanDir)
+		}
+
+		if folderKey == "" || folderKey == "." || folderKey == string(filepath.Separator) {
+			folderKey = "."
+		}
+
+		idx, ok := groupMap[folderKey]
+		if !ok {
+			idx = len(groups)
+			groupMap[folderKey] = idx
+			groups = append(groups, folderGroup{Name: folderKey, FullPath: cleanDir})
+		}
+		groups[idx].FileIndices = append(groups[idx].FileIndices, i)
+		groups[idx].TotalOriginalBytes += f.OriginalSize
+		groups[idx].TotalConvertedBytes += f.ConvertedSize
+		groups[idx].FileCount++
+	}
+
+	sort.Slice(groups, func(i, j int) bool {
+		if groups[i].Name == "." && groups[j].Name != "." {
+			return true
+		}
+		if groups[j].Name == "." && groups[i].Name != "." {
+			return false
+		}
+		return strings.ToLower(groups[i].Name) < strings.ToLower(groups[j].Name)
+	})
+
+	return groups
 }
 
 // countLines returns the number of newline-separated lines in s. A trailing

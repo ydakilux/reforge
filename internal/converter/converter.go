@@ -176,14 +176,50 @@ func (c *Converter) Process(ctx context.Context, job types.Job, dryRun bool) {
 	// Stat the temp output
 	tempInfo, err := os.Stat(tempPath)
 	if err != nil {
-		c.Log.Errorf("Failed to stat temp file: %v", err)
+		c.Log.Errorf("Failed to stat temp file for %s: %v", job.FilePath, err)
 		c.UI.CompleteError(jobID, fmt.Sprintf("✗ ERROR   [%d/%d] %s", job.FileNumber, job.TotalFiles, fileName))
+		if dbErr := c.DB.UpdateRecord(ctx, job.DriveRoot, job.FileHash, types.Record{
+			OriginalSize:    job.OriginalSize,
+			Error:           "stat_temp_failed",
+			SourceCodec:     job.CodecID,
+			SourceContainer: strings.ToLower(filepath.Ext(job.FilePath)),
+			SourcePath:      job.FilePath,
+			Width:           job.Width,
+			Height:          job.Height,
+			DurationSecs:    job.DurationSeconds,
+			ConvertedAt:     time.Now().UTC().Format(time.RFC3339),
+			RunID:           c.RunID,
+		}); dbErr != nil {
+			c.Log.Errorf("Failed to update error record for %s: %v", job.FilePath, dbErr)
+		}
 		os.Remove(tempPath) //nolint:errcheck
 		c.Stats.IncrFilesErrored()
 		return
 	}
 
 	newSize := tempInfo.Size()
+	if newSize == 0 {
+		c.Log.Errorf("Output file is empty (0 bytes) for %s", job.FilePath)
+		c.UI.CompleteError(jobID, fmt.Sprintf("✗ FAILED  [%d/%d] %s (empty output)", job.FileNumber, job.TotalFiles, fileName))
+		if dbErr := c.DB.UpdateRecord(ctx, job.DriveRoot, job.FileHash, types.Record{
+			OriginalSize:    job.OriginalSize,
+			Error:           "empty_output",
+			SourceCodec:     job.CodecID,
+			SourceContainer: strings.ToLower(filepath.Ext(job.FilePath)),
+			SourcePath:      job.FilePath,
+			Width:           job.Width,
+			Height:          job.Height,
+			DurationSecs:    job.DurationSeconds,
+			ConvertedAt:     time.Now().UTC().Format(time.RFC3339),
+			RunID:           c.RunID,
+		}); dbErr != nil {
+			c.Log.Errorf("Failed to update error record for %s: %v", job.FilePath, dbErr)
+		}
+		os.Remove(tempPath) //nolint:errcheck
+		c.Stats.IncrFilesErrored()
+		return
+	}
+
 	origMB := float64(job.OriginalSize) / (1024 * 1024)
 	newMB := float64(newSize) / (1024 * 1024)
 
@@ -206,8 +242,24 @@ func (c *Converter) Process(ctx context.Context, job types.Job, dryRun bool) {
 		}
 
 		if err := MoveFile(tempPath, finalPath); err != nil {
-			c.Log.Errorf("Failed to move file to final location: %v", err)
+			c.Log.Errorf("Failed to move file to final location for %s: %v", job.FilePath, err)
+			c.UI.CompleteError(jobID, fmt.Sprintf("✗ ERROR   [%d/%d] %s", job.FileNumber, job.TotalFiles, fileName))
+			if dbErr := c.DB.UpdateRecord(ctx, job.DriveRoot, job.FileHash, types.Record{
+				OriginalSize:    job.OriginalSize,
+				Error:           "move_failed",
+				SourceCodec:     job.CodecID,
+				SourceContainer: strings.ToLower(filepath.Ext(job.FilePath)),
+				SourcePath:      job.FilePath,
+				Width:           job.Width,
+				Height:          job.Height,
+				DurationSecs:    job.DurationSeconds,
+				ConvertedAt:     time.Now().UTC().Format(time.RFC3339),
+				RunID:           c.RunID,
+			}); dbErr != nil {
+				c.Log.Errorf("Failed to update error record for %s: %v", job.FilePath, dbErr)
+			}
 			os.Remove(tempPath) //nolint:errcheck
+			c.Stats.IncrFilesErrored()
 			return
 		}
 
@@ -311,6 +363,7 @@ func BuildConversionArgs(inputPath, outputPath, outputExt, encoderName string, q
 	args := []string{
 		"-hide_banner", "-y", "-nostats",
 		"-progress", "pipe:1",
+		"-err_detect", "explode",
 		"-i", inputPath,
 	}
 

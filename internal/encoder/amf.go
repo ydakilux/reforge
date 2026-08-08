@@ -41,10 +41,16 @@ func (e *AmfEncoder) IsAvailable(ffmpegPath string) bool {
 }
 
 // ParseError inspects FFmpeg stderr for AMF-specific GPU errors and returns a human-readable message.
+// Covers errors from both legacy AMF and the enhanced AMF hardware memory mapping added in FFmpeg 9.
 func (e *AmfEncoder) ParseError(stderr string) (bool, string) {
 	lower := strings.ToLower(stderr)
 	if strings.Contains(lower, "encoder creation error") {
 		return true, "AMF: encoder creation failed"
+	}
+	// FFmpeg 9: AMF hardware memory mapping errors
+	if strings.Contains(lower, "amf_dx11") ||
+		strings.Contains(lower, "memory mapping") && strings.Contains(lower, "amf") {
+		return true, "AMF: hardware memory mapping error (FFmpeg 9 feature — update AMD drivers)"
 	}
 	if strings.Contains(lower, "amf") && strings.Contains(lower, "error") {
 		return true, "AMF: encoding error"

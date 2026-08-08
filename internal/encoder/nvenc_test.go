@@ -113,19 +113,33 @@ func TestNvencParseError(t *testing.T) {
 			"driver_api_version_mismatch",
 			"[hevc_nvenc @ 0x...] Driver does not support the required nvenc API version. Required: 13.0 Found: 12.2",
 			true,
-			"NVENC: driver too old — update NVIDIA driver to use GPU encoding",
+			"NVENC: driver too old — update NVIDIA driver to ≥ 610 to use GPU encoding with FFmpeg 9",
 		},
 		{
 			"minimum_driver_message",
 			"[hevc_nvenc @ 0x...] The minimum required Nvidia driver for nvenc is 570.0 or newer",
 			true,
-			"NVENC: driver too old — update NVIDIA driver to use GPU encoding",
+			"NVENC: driver too old — update NVIDIA driver to ≥ 610 to use GPU encoding with FFmpeg 9",
 		},
 		{
 			"error_while_opening_encoder",
 			"[vost#0:0] [enc:hevc_nvenc] Error while opening encoder – maybe incorrect parameters such as bit_rate, rate, width or height",
 			true,
-			"NVENC: driver too old — update NVIDIA driver to use GPU encoding",
+			"NVENC: driver too old — update NVIDIA driver to ≥ 610 to use GPU encoding with FFmpeg 9",
+		},
+		// FFmpeg 9: NVENC SDK version mismatch (SDK < 11.1 not supported)
+		{
+			"ffmpeg9_nvenc_sdk_version",
+			"[hevc_nvenc @ 0x...] nvenc sdk version 10.0 is not supported",
+			true,
+			"NVENC: driver too old — update NVIDIA driver to ≥ 610 to use GPU encoding with FFmpeg 9",
+		},
+		// Real FFmpeg 9.0 error: NVENC API 13.1 required, driver >= 610.00 needed
+		{
+			"ffmpeg9_api13_mismatch",
+			"[hevc_nvenc @ 0000018943135f00] Driver does not support the required nvenc API version. Required: 13.1 Found: 13.0\n[hevc_nvenc @ 0000018943135f00] The minimum required Nvidia driver for nvenc is 610.00 or newer",
+			true,
+			"NVENC: driver too old — update NVIDIA driver to ≥ 610 to use GPU encoding with FFmpeg 9",
 		},
 		{
 			"normal_output",

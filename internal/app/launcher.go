@@ -338,7 +338,9 @@ func (m launcherModel) View() string {
 	}
 
 	var b strings.Builder
-	b.WriteString(launcherStyleTitle.Render("Reforge  —  Main Menu") + "\n\n")
+	b.WriteString(launcherStyleTitle.Render("Reforge") +
+		launcherStyleHint.Render(" v"+AppVersion) +
+		launcherStyleTitle.Render("  —  Main Menu") + "\n\n")
 
 	switch m.state {
 	case launcherStateMenu:

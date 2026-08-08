@@ -53,11 +53,14 @@ func (e *NvencEncoder) ParseError(stderr string) (bool, string) {
 		return true, "NVENC: encoder initialization failed"
 	}
 	// Driver too old: FFmpeg built against a newer NVENC SDK than the installed driver.
-	// e.g. "Driver does not support the required nvenc API version. Required: 13.0 Found: 12.2"
+	// FFmpeg 9+ requires NVENC SDK >= 11.1 (API 13.1) and NVIDIA driver >= 610.
+	// e.g. "Driver does not support the required nvenc API version. Required: 13.1 Found: 13.0"
+	// e.g. "nvenc sdk version X.Y is not supported" (FFmpeg 9+)
 	if strings.Contains(lower, "does not support the required nvenc api version") ||
+		strings.Contains(lower, "nvenc sdk version") ||
 		strings.Contains(lower, "minimum required nvidia driver") ||
 		strings.Contains(lower, "error while opening encoder") {
-		return true, "NVENC: driver too old — update NVIDIA driver to use GPU encoding"
+		return true, "NVENC: driver too old — update NVIDIA driver to ≥ 610 to use GPU encoding with FFmpeg 9"
 	}
 	return false, ""
 }
