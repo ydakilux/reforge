@@ -237,11 +237,14 @@ func (s *SQLiteStore) GetSpaceSaved(ctx context.Context, period string) (*SpaceS
 	conditions = append(conditions, `(note IS NULL OR note = '')`)
 
 	var args []interface{}
+	// converted_at is stored as RFC3339 UTC ("2006-01-02T15:04:05Z"). The bound
+	// must use the same format: datetime() yields "YYYY-MM-DD HH:MM:SS", and as
+	// strings 'T' > ' ', which skewed the cutoff by up to a day.
 	switch period {
 	case "week":
-		conditions = append(conditions, `converted_at >= datetime('now', '-7 days')`)
+		conditions = append(conditions, `converted_at >= strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-7 days')`)
 	case "month":
-		conditions = append(conditions, `converted_at >= datetime('now', '-30 days')`)
+		conditions = append(conditions, `converted_at >= strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-30 days')`)
 	case "total":
 		// no time filter
 	default:

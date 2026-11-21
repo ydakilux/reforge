@@ -435,3 +435,21 @@ func TestBuildConversionArgs_NonTSInput_StillCopiesAAC(t *testing.T) {
 
 	assertContainsSequence(t, args, "-c:a", "copy")
 }
+
+func TestUniqueFinalPath(t *testing.T) {
+	dir := t.TempDir()
+	p1 := uniqueFinalPath(dir, "a", "deadbeef", ".mp4")
+	if filepath.Base(p1) != "a.mp4" {
+		t.Fatalf("p1 = %s", p1)
+	}
+	os.WriteFile(p1, []byte("x"), 0644)
+	p2 := uniqueFinalPath(dir, "a", "deadbeef", ".mp4")
+	if filepath.Base(p2) != "a__deadbeef.mp4" {
+		t.Fatalf("p2 = %s", p2)
+	}
+	os.WriteFile(p2, []byte("x"), 0644)
+	p3 := uniqueFinalPath(dir, "a", "deadbeef", ".mp4")
+	if filepath.Base(p3) != "a__deadbeef_2.mp4" {
+		t.Fatalf("p3 = %s (must never reuse an existing name)", p3)
+	}
+}

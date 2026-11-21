@@ -96,21 +96,59 @@ func (s *SQLiteStore) GetRecord(ctx context.Context, driveRoot, fileHash string)
 }
 
 func (s *SQLiteStore) UpdateRecord(ctx context.Context, driveRoot, fileHash string, rec types.Record) error {
-	_, err := s.db.ExecContext(ctx, `
-		INSERT OR REPLACE INTO conversions
-			(file_hash, drive_root, source_path, original_size, converted_size,
-			 output_path, note, error, source_codec, source_container,
-			 width, height, duration_secs, converted_at, conversion_duration_secs, run_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		fileHash, driveRoot, nullString(rec.SourcePath), rec.OriginalSize, nullInt64(rec.ConvertedSize),
-		nullString(rec.Output), nullString(rec.Note), nullString(rec.Error),
-		nullString(rec.SourceCodec), nullString(rec.SourceContainer),
-		nullInt64(int64(rec.Width)), nullInt64(int64(rec.Height)), nullFloat64(rec.DurationSecs),
-		nullString(rec.ConvertedAt), nullFloat64(rec.ConversionDurationSecs),
-		nullInt64(rec.RunID),
-	)
+	// A failed (re)conversion must not erase the record of an earlier success:
+	// that would lose the link to the existing output file. The failure is still
+	// recorded in the run's own history (run_files) below.
+	keepConversion := false
+	if rec.Error != "" {
+		if prev, err := s.GetRecord(ctx, driveRoot, fileHash); err == nil && prev != nil && prev.Output != "" {
+			keepConversion = true
+			if s.logger != nil {
+				s.logger.Warnf("Keeping existing successful record for %s (new attempt failed: %s)", prev.SourcePath, rec.Error)
+			}
+		}
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("upsert record: %w", err)
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	if !keepConversion {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT OR REPLACE INTO conversions
+				(file_hash, drive_root, source_path, original_size, converted_size,
+				 output_path, note, error, source_codec, source_container,
+				 width, height, duration_secs, converted_at, conversion_duration_secs, run_id)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			fileHash, driveRoot, nullString(rec.SourcePath), rec.OriginalSize, nullInt64(rec.ConvertedSize),
+			nullString(rec.Output), nullString(rec.Note), nullString(rec.Error),
+			nullString(rec.SourceCodec), nullString(rec.SourceContainer),
+			nullInt64(int64(rec.Width)), nullInt64(int64(rec.Height)), nullFloat64(rec.DurationSecs),
+			nullString(rec.ConvertedAt), nullFloat64(rec.ConversionDurationSecs),
+			nullInt64(rec.RunID),
+		); err != nil {
+			return fmt.Errorf("upsert record: %w", err)
+		}
+	}
+
+	if rec.RunID != 0 {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT OR REPLACE INTO run_files
+				(run_id, file_hash, drive_root, source_path, output_path, original_size,
+				 converted_size, note, error, source_codec, converted_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			rec.RunID, fileHash, driveRoot, nullString(rec.SourcePath), nullString(rec.Output),
+			rec.OriginalSize, nullInt64(rec.ConvertedSize), nullString(rec.Note), nullString(rec.Error),
+			nullString(rec.SourceCodec), nullString(rec.ConvertedAt),
+		); err != nil {
+			return fmt.Errorf("upsert run file: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit record: %w", err)
 	}
 	return nil
 }

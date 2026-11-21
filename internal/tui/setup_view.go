@@ -143,6 +143,9 @@ func (m setupModel) viewStepOutputDrive(w int) string {
 			b.WriteString(setupStyleHint.Render(fmt.Sprintf("  Space needed: %s", fileutil.FormatBytes(totalBytes))) + "\n")
 		}
 		b.WriteString(setupStyleHint.Render("  [↑/k] [↓/j] navigate   [Enter] confirm   [Esc] use source drive") + "\n\n")
+		if len(m.opts.AvailableDrives) == 0 {
+			b.WriteString(setupStyleHint.Render("  Detecting drives…  (press Esc to use the source drive)") + "\n")
+		}
 		for i, d := range m.opts.AvailableDrives {
 			cursor := "  "
 			var style lipgloss.Style

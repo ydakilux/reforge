@@ -127,7 +127,10 @@ func TestTruncate(t *testing.T) {
 		{"hello", 2, "he"},
 		{"hello", 1, "h"},
 		{"", 5, ""},
-		{"日本語テスト", 4, "日..."}, // unicode: 1 rune + "..." (maxLen-3=1)
+		// Wide runes are 2 cells: with 4 cells only "..." fits (a 2-cell rune
+		// plus "..." would be 5 cells and overflow the line).
+		{"日本語テスト", 4, "..."},
+		{"日本語テスト", 5, "日..."}, // 2 cells + "..." = 5
 	}
 	for _, tc := range tests {
 		got := truncate(tc.s, tc.maxLen)
@@ -473,20 +476,33 @@ func TestKeyStopAfterCurrentReturnsCmd(t *testing.T) {
 	}
 }
 
-func TestKeyQuitReturnsCmd(t *testing.T) {
+func TestKeyQuitRequiresConfirmation(t *testing.T) {
 	m := testModel()
-	called := false
-	m.onControl = func(a controlAction) { called = true }
+	calls := 0
+	m.onControl = func(a controlAction) {
+		if a == actionStopNow {
+			calls++
+		}
+	}
 
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
-	if cmd == nil {
-		t.Error("key 'q' should return non-nil cmd")
-	}
+	// First 'q' only asks for confirmation.
+	mm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
 	if cmd != nil {
-		cmd()
+		t.Error("'q' must not stop immediately; it should ask for confirmation")
 	}
-	if !called {
-		t.Error("onControl not called for 'q'")
+	m = mm.(model)
+	if !m.confirmQuit {
+		t.Fatal("confirmQuit not set after 'q'")
+	}
+
+	// Confirming with 'y' fires the stop.
+	_, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	if cmd == nil {
+		t.Fatal("'y' should confirm and return a cmd")
+	}
+	cmd()
+	if calls != 1 {
+		t.Errorf("StopNow fired %d times, want 1", calls)
 	}
 }
 

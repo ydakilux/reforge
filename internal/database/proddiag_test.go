@@ -1,6 +1,7 @@
 package database
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -14,7 +15,7 @@ func TestProdOpenTiming(t *testing.T) {
 	l := logrus.New()
 	l.SetLevel(logrus.WarnLevel)
 	start := time.Now()
-	store, err := NewSQLiteStore(`D:\Repos\reforge\conversions.db`, l)
+	store, err := NewSQLiteStore(filepath.Join(t.TempDir(), "conversions.db"), l)
 	d := time.Since(start)
 	if err != nil {
 		t.Fatal(err)

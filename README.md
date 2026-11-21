@@ -91,6 +91,7 @@ The tool runs natively on Linux and WSL2. A few things to be aware of:
 - **GPU encoding on WSL2** requires NVIDIA GPU + the [CUDA on WSL](https://docs.nvidia.com/cuda/wsl-user-guide/) driver installed on the Windows host. AMD and Intel GPU encoding are not supported on WSL. When GPU encoding is unavailable, the tool automatically falls back to CPU (`libx265`).
 - **Config portability**: if your `reforge.json` was created on Windows with a GPU encoder (e.g. `hevc_nvenc`), the tool will detect it is unavailable on WSL/Linux and fall back to `libx265` automatically.
 - **Output paths**: on WSL, output is written relative to the detected mount point (e.g. `/mnt/d/REFORGED/...`). On native Linux, it uses the first meaningful path prefix (e.g. `/home/user/REFORGED/...`).
+- **Re-scanning**: the `REFORGED` output folder is never scanned as input (so pointing the tool at a whole drive is safe), overlapping input paths are de-duplicated, and files with identical content are converted only once per run.
 
 ## 📦 Installation
 
@@ -131,7 +132,7 @@ reforge.exe [flags] <directory>
 | `--dry-run` | `false` | Preview mode, no actual conversion |
 | `--encoder` | `auto` | Encoder: `auto`, `hevc_nvenc`, `hevc_amf`, `hevc_qsv`, `libx265` |
 | `--bypass` | `false` | Re-convert files already recorded in the cache database |
-| `--force-hevc` | `false` | Re-compress files that are already H.265/HEVC |
+| `--force-hevc` | `false` | Re-compress files that are already H.265/HEVC (also overrides an earlier "already HEVC" skip; files already converted or marked not beneficial are still skipped unless `--bypass` is set) |
 | `--same-drive` | `false` | Write output to the same drive as source (skips drive prompt) |
 | `--jobs` | `0` | Parallel conversion jobs; `0` uses benchmark recommendation |
 | `--non-interactive` | `false` | Disable interactive prompts (auto-fallback to CPU on GPU failure) |
@@ -213,7 +214,18 @@ When you run the tool, it will ask:
    - Press Enter: Output to same drive as source (`D:\REFORGED\`)
    - Specify drive: Output to different drive (`E:\` → `E:\REFORGED\`)
 
-When a GPU encoder fails mid-conversion, the tool asks whether to retry with CPU encoding. Use `--non-interactive` to skip this prompt and auto-fallback.
+When a GPU encoder fails mid-conversion, the tool asks whether to retry with CPU encoding. The answer applies to the **rest of the run**: after a fallback, remaining files encode on CPU directly (no GPU retry, no further prompt); answering no is remembered too. Use `--non-interactive` to skip the prompt and auto-fallback.
+
+### During a Conversion
+
+| Key | Action |
+|-----|--------|
+| `p` | Pause / resume (running FFmpeg processes are suspended; timers and ETA exclude paused time) |
+| `s` | Finish the current files, then stop (also works while paused) |
+| `q` / `Ctrl+C` | Cancel everything now — asks for confirmation (`y` or a second `Ctrl+C`); any other key keeps going |
+| `↑` `↓` `PgUp` `PgDn` `G` | Scroll the log |
+
+A cancelled file is not recorded as an error and its temporary file is removed, so it is picked up again on the next run.
 
 ## ⚙️ Configuration
 
@@ -492,15 +504,16 @@ After processing, you'll see a comprehensive summary:
 
 - **GPU Auto-Detection** - Trial-encode verification ensures encoder actually works before use
 - **Encoder-Specific Quality** - Each encoder gets its own quality normalization (CRF, CQ, QP, global_quality)
-- **Fallback Manager** - GPU error recovery with interactive or automatic CPU fallback
+- **Fallback Manager** - GPU error recovery with interactive or automatic CPU fallback, remembered for the rest of the run
 - **Producer-Consumer Pipeline** - Concurrent file processing with configurable queue size
 - **BLAKE3 Hashing** - Fast file identification (partial or full hash)
 - **SQLite Database** - Centralized conversion cache (`conversions.db` next to executable) with WAL mode
+- **Run History** - Each invocation is a row in `runs`; `run_files` keeps the files each run handled, so older runs keep their file list when a file is processed again
 - **Atomic File Operations** - Safe writes with temp files and rename
 - **Enriched Metadata** - Source codec, container, resolution, duration, timestamps stored per conversion
 - **Query Subcommands** - Seven built-in commands to inspect conversion history, including an interactive HTML dashboard
 - **Smart Progress Reporting** - FFmpeg progress parsing via stdout
-- **Multi-GPU Distribution** - Speed-balanced work distribution across NVIDIA GPUs
+- **Multi-GPU Distribution** - Speed-balanced work distribution across NVIDIA GPUs, with `max_encodes_per_gpu` enforced when each encode starts
 
 ## 🛠️ Developer Workflow
 

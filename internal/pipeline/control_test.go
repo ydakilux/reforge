@@ -358,3 +358,29 @@ func BenchmarkCheckPauseUncontested(b *testing.B) {
 		}
 	})
 }
+
+// Stopping while paused must resume suspended FFmpeg processes, otherwise
+// "finish current jobs" can never complete.
+func TestStopWhilePausedResumesSuspendedProcesses(t *testing.T) {
+	for name, stop := range map[string]func(*Controller){
+		"StopAfterCurrent": (*Controller).StopAfterCurrent,
+		"StopNow":          (*Controller).StopNow,
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := NewController()
+			suspended := false
+			c.RegisterSuspendFn(func(s bool) { suspended = s })
+			c.Pause()
+			if !suspended {
+				t.Fatal("precondition: process should be suspended after Pause")
+			}
+			stop(c)
+			if suspended {
+				t.Error("process still suspended after stop")
+			}
+			if c.IsPaused() {
+				t.Error("controller still paused after stop")
+			}
+		})
+	}
+}

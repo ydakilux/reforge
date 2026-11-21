@@ -191,15 +191,40 @@ type jobState struct {
 	totalSeconds float64
 }
 
-func (j *jobState) elapsed() time.Duration {
-	return time.Since(j.startedAt).Round(time.Second)
+// pauseSpan is one pause interval; to is zero while the pause is ongoing.
+type pauseSpan struct{ from, to time.Time }
+
+// activeDuration returns the time between from and to excluding every pause,
+// so timers and ETAs do not keep counting while processing is suspended.
+func (m model) activeDuration(from, to time.Time) time.Duration {
+	if from.IsZero() || !to.After(from) {
+		return 0
+	}
+	total := to.Sub(from)
+	for _, p := range m.pauses {
+		s, e := p.from, p.to
+		if e.IsZero() || e.After(to) {
+			e = to
+		}
+		if s.Before(from) {
+			s = from
+		}
+		if e.After(s) {
+			total -= e.Sub(s)
+		}
+	}
+	return total
 }
 
-func (j *jobState) eta() string {
+func (m model) jobElapsed(j *jobState) time.Duration {
+	return m.activeDuration(j.startedAt, time.Now()).Round(time.Second)
+}
+
+func (m model) jobETA(j *jobState) string {
 	if j.pct <= 0 {
 		return "–"
 	}
-	elapsed := time.Since(j.startedAt)
+	elapsed := m.activeDuration(j.startedAt, time.Now())
 	remaining := time.Duration(float64(elapsed) * float64(100-j.pct) / float64(j.pct))
 	return "~" + fmtDuration(remaining.Round(time.Second))
 }
@@ -241,6 +266,11 @@ type model struct {
 	paused    bool
 	stopKind  StopKind
 	onControl func(action controlAction) // called on key press
+	// confirmQuit is true while waiting for the user to confirm an immediate
+	// cancel (q / Ctrl+C), so a stray keypress cannot kill running encodes.
+	confirmQuit bool
+	// pauses records every pause interval so elapsed/ETA exclude paused time.
+	pauses []pauseSpan
 	// onScreenReady is called once on the first WindowSizeMsg (either phase).
 	onScreenReady func()
 	// onReady is called once after the converting phase viewport is initialised.
@@ -296,6 +326,12 @@ func (m model) Init() tea.Cmd {
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// ── Setup phase ───────────────────────────────────────────────────────────
 	if m.phase == phaseSetup {
+		// Keep the repaint loop alive: if it dies here nothing restarts it, and
+		// the converting phase would only repaint when some other message
+		// arrives (timers/ETA frozen, nothing at all while paused).
+		if _, ok := msg.(msgTick); ok {
+			return m, tickCmd()
+		}
 		// Always propagate window size to setup sub-model.
 		if ws, ok := msg.(tea.WindowSizeMsg); ok {
 			m.width = ws.Width
@@ -351,6 +387,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			// still allow scroll keys
 		}
+		// Waiting for confirmation of an immediate cancel: only y / Ctrl+C
+		// confirm; any other key dismisses the prompt.
+		if m.confirmQuit {
+			m.confirmQuit = false
+			switch msg.String() {
+			case "y", "Y", "ctrl+c":
+				if m.onControl != nil && m.stopKind != StopKindNow {
+					fn := m.onControl
+					return m, func() tea.Msg { fn(actionStopNow); return nil }
+				}
+			}
+			return m, nil
+		}
 		// Scroll keys go to the viewport; all others go to control handler.
 		switch msg.String() {
 		case "up", "k":
@@ -396,16 +445,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			case "q", "Q", "ctrl+c":
 				if m.stopKind != StopKindNow {
-					fn := m.onControl
-					return m, func() tea.Msg { fn(actionStopNow); return nil }
+					m.confirmQuit = true
 				}
+				return m, nil
 			}
 		}
 		return m, nil
 
 	case msgControlState:
+		now := time.Now()
+		if msg.paused && !m.paused {
+			m.pauses = append(m.pauses, pauseSpan{from: now})
+		} else if !msg.paused && m.paused && len(m.pauses) > 0 {
+			m.pauses[len(m.pauses)-1].to = now
+		}
 		m.paused = msg.paused
 		m.stopKind = msg.stopping
+		if m.stopKind == StopKindNow {
+			m.confirmQuit = false
+		}
 		return m, nil
 
 	case tea.WindowSizeMsg:
@@ -470,7 +528,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case msgJobProgress:
 		if js, ok := m.jobIndex[msg.id]; ok {
-			js.pct = msg.pct
+			js.pct = clampPct(msg.pct)
 		}
 		return m, nil
 
@@ -570,7 +628,7 @@ func (m model) globalETA() string {
 	}
 
 	now := time.Now()
-	totalElapsed := now.Sub(m.timerStart)
+	totalElapsed := m.activeDuration(m.timerStart, now)
 
 	// ── gather per-job remaining seconds from active jobs ──────────────────
 	// Only use jobs that have made measurable progress.
@@ -582,7 +640,7 @@ func (m model) globalETA() string {
 		if js.pct <= 0 {
 			continue
 		}
-		jobElapsed := now.Sub(js.startedAt).Seconds()
+		jobElapsed := m.activeDuration(js.startedAt, now).Seconds()
 		if jobElapsed <= 0 {
 			continue
 		}
@@ -641,7 +699,7 @@ func (m model) globalETA() string {
 			if js.pct <= 0 {
 				continue
 			}
-			jobElapsed := now.Sub(js.startedAt).Seconds()
+			jobElapsed := m.activeDuration(js.startedAt, now).Seconds()
 			if jobElapsed <= 0 {
 				continue
 			}
@@ -662,7 +720,7 @@ func (m model) globalETA() string {
 
 	// ── blend with completion-based throughput once files start finishing ──
 	if m.etaDoneFiles > 0 && !m.etaFirstDoneTime.IsZero() {
-		sinceFirstDone := now.Sub(m.etaFirstDoneTime).Seconds()
+		sinceFirstDone := m.activeDuration(m.etaFirstDoneTime, now).Seconds()
 		if sinceFirstDone > 0 {
 			var completionBasedRemaining float64
 			if m.etaTotalBytes > 0 && m.etaDoneBytes > 0 {
@@ -725,7 +783,7 @@ func (m model) renderInner() string {
 	title := styleTitle.Render("Reforge")
 	var timerStr string
 	if m.timerActive {
-		elapsed := time.Since(m.timerStart).Round(time.Second)
+		elapsed := m.activeDuration(m.timerStart, time.Now()).Round(time.Second)
 		timerPart := styleTimer.Render("⏱ " + fmtDuration(elapsed))
 		if eta := m.globalETA(); eta != "" {
 			timerStr = timerPart + styleTimer.Render(" / "+eta)
@@ -778,6 +836,8 @@ func (m model) renderControlBar(w int) string {
 	switch {
 	case m.summaryReady:
 		status = styleLogOK.Render("✓ Conversion complete — [Enter/q] Exit  ↑↓/PgUp/PgDn scroll")
+	case m.confirmQuit:
+		status = styleLogErr.Render("⚠  Cancel all conversions now?  [y] yes, cancel   [any other key] keep going")
 	case m.stopKind == StopKindNow:
 		status = styleLogErr.Render("⛔ Cancelling — waiting for FFmpeg to stop…")
 	case m.stopKind == StopKindAfterCurrent:
@@ -815,8 +875,8 @@ func (m model) renderJob(js *jobState, w int) string {
 	// Build the right-hand side first so we can measure its true rendered
 	// width and give the bar exactly the remaining columns.
 	pctStr := stylePct.Render(fmt.Sprintf("%d%%", js.pct))
-	elapsedStr := styleElapsed.Render("elapsed " + fmtDuration(js.elapsed()))
-	etaStr := styleETA.Render("ETA " + js.eta())
+	elapsedStr := styleElapsed.Render("elapsed " + fmtDuration(m.jobElapsed(js)))
+	etaStr := styleETA.Render("ETA " + m.jobETA(js))
 	right := pctStr + "  " + elapsedStr + "  " + etaStr
 	const sep = "  " // gap between bar and right side
 	barWidth := w - lipgloss.Width(right) - len(sep)
@@ -899,6 +959,19 @@ func (m model) lastLogLines(n int) []logLine {
 	return m.logLines[len(m.logLines)-n:]
 }
 
+// clampPct bounds a progress percentage to [0, 100]. FFmpeg can report more
+// than 100% when the probed duration is slightly short, which would otherwise
+// show "103%" and produce a negative ETA.
+func clampPct(p int) int {
+	if p < 0 {
+		return 0
+	}
+	if p > 100 {
+		return 100
+	}
+	return p
+}
+
 // renderBar renders a Unicode block progress bar of the given width.
 func renderBar(pct, width int) string {
 	if width <= 0 {
@@ -936,20 +1009,35 @@ func fmtDuration(d time.Duration) string {
 	return fmt.Sprintf("%d:%02d", m, s)
 }
 
-// truncate clips s to maxLen visible characters (no ANSI awareness needed
-// here since we apply styles after truncation).
+// truncate clips s to maxLen terminal cells (no ANSI awareness needed here
+// since we apply styles after truncation). It counts display width rather than
+// runes so wide characters (CJK, emoji) cannot overflow the line.
 func truncate(s string, maxLen int) string {
 	if maxLen <= 0 {
 		return ""
 	}
-	runes := []rune(s)
-	if len(runes) <= maxLen {
+	if lipgloss.Width(s) <= maxLen {
 		return s
 	}
 	if maxLen <= 3 {
-		return string(runes[:maxLen])
+		return cutWidth(s, maxLen)
 	}
-	return string(runes[:maxLen-3]) + "..."
+	return cutWidth(s, maxLen-3) + "..."
+}
+
+// cutWidth returns the longest prefix of s that fits in w terminal cells.
+func cutWidth(s string, w int) string {
+	var b strings.Builder
+	cur := 0
+	for _, r := range s {
+		rw := lipgloss.Width(string(r))
+		if cur+rw > w {
+			break
+		}
+		b.WriteRune(r)
+		cur += rw
+	}
+	return b.String()
 }
 
 // truncateANSI truncates an ANSI-styled string to at most maxLen visible
@@ -1002,12 +1090,13 @@ func New(opts SetupOptions, onControl func(action ControlAction)) (*UI, <-chan S
 
 	// If stdout is not a terminal, skip Bubble Tea entirely — it requires a TTY.
 	if !term.IsTerminal(int(os.Stdout.Fd())) {
-		// Deliver zero-value answers so callers don't block.
+		// Deliver zero-value answers (NOT Cancelled) so callers proceed using
+		// their CLI flags/config; a missing input path is reported by the caller.
 		go func() {
-			answersCh <- SetupAnswers{Cancelled: true}
+			answersCh <- SetupAnswers{}
 			close(answersCh)
 		}()
-		return &UI{plain: true, plainW: os.Stdout, logW: &tuiWriter{plain: true, plainW: os.Stdout}}, answersCh
+		return NewPlain(os.Stdout), answersCh
 	}
 
 	// screenReady is closed as soon as the alt-screen gets its first
@@ -1057,6 +1146,13 @@ func New(opts SetupOptions, onControl func(action ControlAction)) (*UI, <-chan S
 		}
 	}
 	return u, answersCh
+}
+
+// NewPlain returns a UI that writes plain text to w instead of driving a
+// Bubble Tea program. It is what New uses when stdout is not a terminal, and it
+// lets callers (and tests) run the conversion code without a TTY.
+func NewPlain(w io.Writer) *UI {
+	return &UI{plain: true, plainW: w, logW: &tuiWriter{plain: true, plainW: w}}
 }
 
 // ControlAction mirrors the internal controlAction for external callers.

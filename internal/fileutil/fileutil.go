@@ -127,21 +127,32 @@ func GetFileHash(filePath string, partial bool) (string, error) {
 	hasher := blake3.New()
 
 	if partial {
+		// readChunk hashes up to HashChunkSize bytes starting at off. A short
+		// read at EOF is expected (small files); any other error must abort,
+		// otherwise a transient I/O failure would silently yield a different
+		// hash for the same file and defeat the "already converted" cache.
 		buf := make([]byte, HashChunkSize)
-		n, _ := io.ReadFull(f, buf)
-		hasher.Write(buf[:n])
-
-		if fileSize > HashChunkSize*2 {
-			middle := fileSize / 2
-			f.Seek(middle, 0) //nolint:errcheck
-			n, _ = io.ReadFull(f, buf)
+		readChunk := func(off int64) error {
+			n, err := f.ReadAt(buf, off)
+			if err != nil && err != io.EOF {
+				return err
+			}
 			hasher.Write(buf[:n])
+			return nil
 		}
 
+		if err := readChunk(0); err != nil {
+			return "", fmt.Errorf("read start: %w", err)
+		}
+		if fileSize > HashChunkSize*2 {
+			if err := readChunk(fileSize / 2); err != nil {
+				return "", fmt.Errorf("read middle: %w", err)
+			}
+		}
 		if fileSize > HashChunkSize {
-			f.Seek(-HashChunkSize, 2) //nolint:errcheck
-			n, _ = io.ReadFull(f, buf)
-			hasher.Write(buf[:n])
+			if err := readChunk(fileSize - HashChunkSize); err != nil {
+				return "", fmt.Errorf("read end: %w", err)
+			}
 		}
 
 		sizeBuf := make([]byte, 8)

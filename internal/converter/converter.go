@@ -5,11 +5,13 @@ package converter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -48,6 +50,8 @@ type Converter struct {
 	// RunID, when non-zero, is stamped onto every conversion record this
 	// converter writes so they can be grouped under a single run row.
 	RunID int64
+	// GPUSlots, when non-nil, caps concurrent encodes per GPU. Nil means no cap.
+	GPUSlots *pipeline.GPUSlots
 }
 
 // Process converts a single job. It is safe to call from multiple goroutines.
@@ -101,9 +105,16 @@ func (c *Converter) Process(ctx context.Context, job types.Job, dryRun bool) {
 	if tempDir == "" {
 		tempDir = filepath.Join(outputRoot, OutputDirName, "_TEMP", sanitized)
 	}
-	os.MkdirAll(tempDir, 0755) //nolint:errcheck
+	if err := os.MkdirAll(tempDir, 0755); err != nil {
+		c.Log.Errorf("Failed to create temp directory %s: %v", tempDir, err)
+		c.failJob(ctx, jobID, job, fileName, "mkdir_temp_failed")
+		return
+	}
 
-	hash8 := job.FileHash[:8]
+	hash8 := job.FileHash
+	if len(hash8) > 8 {
+		hash8 = hash8[:8]
+	}
 
 	// Determine output extension
 	inputExt := strings.ToLower(filepath.Ext(job.FilePath))
@@ -112,12 +123,48 @@ func (c *Converter) Process(ctx context.Context, job types.Job, dryRun bool) {
 		outputExt = ".mkv"
 	}
 
-	tempPath := filepath.Join(tempDir, fmt.Sprintf("%s%s%s", TempFilePrefix, hash8, outputExt))
+	// FileNumber keeps the temp name unique even if two jobs share a hash and folder.
+	tempPath := filepath.Join(tempDir, fmt.Sprintf("%s%s_%d%s", TempFilePrefix, hash8, job.FileNumber, outputExt))
+
+	// Once a GPU failure has been handled with a CPU fallback, every later file
+	// goes straight to CPU instead of retrying the GPU (and re-prompting).
+	encoderName := c.Config.VideoEncoder
+	cpuOnly := encoderName == "libx265" || (c.FallbackManager != nil && c.FallbackManager.CPUOnly())
+
+	// Reserve a per-GPU slot so a GPU never runs more than MaxEncodesPerGPU
+	// encodes at once; the granted GPU may differ from the pre-assigned one.
+	releaseSlot := func() {}
+	gpuIndex := job.GPUIndex
+	if !cpuOnly {
+		var slotErr error
+		gpuIndex, releaseSlot, slotErr = c.GPUSlots.Acquire(ctx, job.GPUIndex)
+		if slotErr != nil {
+			c.Log.Warnf("Cancelled while waiting for a GPU slot: %s", fileName)
+			c.UI.CompleteError(jobID, fmt.Sprintf("✗ CANCELLED [%d/%d] %s", job.FileNumber, job.TotalFiles, fileName))
+			c.removeTemp(tempPath)
+			return
+		}
+	}
+	defer func() { releaseSlot() }() // releaseSlot is idempotent per slot
 
 	// Build FFmpeg args
-	qualityArgs := c.SelectedEncoder.QualityArgs(c.Config.QualityPreset, job.Width)
-	deviceArgs := c.SelectedEncoder.DeviceArgs(job.GPUIndex)
-	args := BuildConversionArgs(job.FilePath, tempPath, outputExt, c.Config.VideoEncoder, qualityArgs, deviceArgs, job.VideoInfo)
+	var qualityArgs, deviceArgs []string
+	if cpuOnly && encoderName != "libx265" {
+		cpuEncoder, ok := c.EncoderRegistry.Get("libx265")
+		if !ok {
+			c.Log.Errorf("CPU encoder libx265 is not registered; cannot encode %s on CPU", fileName)
+			c.failJob(ctx, jobID, job, fileName, "cpu_encoder_missing")
+			return
+		}
+		qualityArgs = cpuEncoder.QualityArgs(c.Config.QualityPreset, job.Width)
+		encoderName = "libx265"
+	} else {
+		qualityArgs = c.SelectedEncoder.QualityArgs(c.Config.QualityPreset, job.Width)
+		if !cpuOnly {
+			deviceArgs = c.SelectedEncoder.DeviceArgs(gpuIndex)
+		}
+	}
+	args := BuildConversionArgs(job.FilePath, tempPath, outputExt, encoderName, qualityArgs, deviceArgs, job.VideoInfo)
 
 	// Register suspend/resume callback with the pipeline controller
 	var registerSuspend func(fn func(suspend bool)) (unregister func())
@@ -133,19 +180,40 @@ func (c *Converter) Process(ctx context.Context, job types.Job, dryRun bool) {
 	convStart := time.Now()
 	rc, stderrOut := ffmpeg.Run(ctx, ffmpegExe, args, job.FilePath, job.DurationSeconds, c.Log, onProgress, registerSuspend)
 
+	// User-requested stop: FFmpeg was killed, which is not a conversion failure.
+	// Clean up and leave no error record or error count behind.
+	if rc != 0 && ctx.Err() != nil {
+		c.Log.Infof("Conversion cancelled: %s", fileName)
+		c.UI.CompleteError(jobID, fmt.Sprintf("■ CANCELLED [%d/%d] %s", job.FileNumber, job.TotalFiles, fileName))
+		c.removeTemp(tempPath)
+		return
+	}
+
 	// GPU fallback
-	if rc != 0 && c.Config.VideoEncoder != "libx265" {
+	if rc != 0 && encoderName != "libx265" {
 		shouldFallback, fbErr := c.FallbackManager.HandleGPUError(stderrOut, c.SelectedEncoder, &jobStringer{job})
 		if fbErr != nil {
 			c.Log.Warnf("Fallback error: %v", fbErr)
 		}
 		if shouldFallback {
-			c.Log.Info("Falling back to CPU encoder (libx265)...")
-			cpuEncoder, _ := c.EncoderRegistry.Get("libx265")
-			cpuQualityArgs := cpuEncoder.QualityArgs(c.Config.QualityPreset, job.Width)
-			cpuArgs := BuildConversionArgs(job.FilePath, tempPath, outputExt, "libx265", cpuQualityArgs, nil, job.VideoInfo)
-			rc, stderrOut = ffmpeg.Run(ctx, ffmpegExe, cpuArgs, job.FilePath, job.DurationSeconds, c.Log, onProgress, registerSuspend)
+			cpuEncoder, ok := c.EncoderRegistry.Get("libx265")
+			if !ok {
+				c.Log.Errorf("CPU fallback requested but libx265 is not registered for %s", fileName)
+			} else {
+				releaseSlot() // CPU encode no longer occupies a GPU
+				c.Log.Info("Falling back to CPU encoder (libx265)...")
+				cpuQualityArgs := cpuEncoder.QualityArgs(c.Config.QualityPreset, job.Width)
+				cpuArgs := BuildConversionArgs(job.FilePath, tempPath, outputExt, "libx265", cpuQualityArgs, nil, job.VideoInfo)
+				rc, stderrOut = ffmpeg.Run(ctx, ffmpegExe, cpuArgs, job.FilePath, job.DurationSeconds, c.Log, onProgress, registerSuspend)
+			}
 		}
+	}
+
+	if rc != 0 && ctx.Err() != nil {
+		c.Log.Infof("Conversion cancelled: %s", fileName)
+		c.UI.CompleteError(jobID, fmt.Sprintf("■ CANCELLED [%d/%d] %s", job.FileNumber, job.TotalFiles, fileName))
+		c.removeTemp(tempPath)
+		return
 	}
 
 	if rc != 0 {
@@ -168,7 +236,7 @@ func (c *Converter) Process(ctx context.Context, job types.Job, dryRun bool) {
 		}); err != nil {
 			c.Log.Errorf("Failed to update error record for %s: %v", job.FilePath, err)
 		}
-		os.Remove(tempPath) //nolint:errcheck
+		c.removeTemp(tempPath)
 		c.Stats.IncrFilesErrored()
 		return
 	}
@@ -192,7 +260,7 @@ func (c *Converter) Process(ctx context.Context, job types.Job, dryRun bool) {
 		}); dbErr != nil {
 			c.Log.Errorf("Failed to update error record for %s: %v", job.FilePath, dbErr)
 		}
-		os.Remove(tempPath) //nolint:errcheck
+		c.removeTemp(tempPath)
 		c.Stats.IncrFilesErrored()
 		return
 	}
@@ -215,7 +283,7 @@ func (c *Converter) Process(ctx context.Context, job types.Job, dryRun bool) {
 		}); dbErr != nil {
 			c.Log.Errorf("Failed to update error record for %s: %v", job.FilePath, dbErr)
 		}
-		os.Remove(tempPath) //nolint:errcheck
+		c.removeTemp(tempPath)
 		c.Stats.IncrFilesErrored()
 		return
 	}
@@ -229,19 +297,28 @@ func (c *Converter) Process(ctx context.Context, job types.Job, dryRun bool) {
 		savedMB := origMB - newMB
 		summary := fmt.Sprintf("✓ KEPT    [%d/%d] %-32s  %.2f MB → %.2f MB  (-%.2f MB, %.1f%%)",
 			job.FileNumber, job.TotalFiles, fileutil.TruncateString(fileName, 32), origMB, newMB, savedMB, reduction)
-		// Log to file only (TUI gets it via CompleteKept; logging here would duplicate).
-		c.Log.Infof("%s%s", tui.FileOnlyPrefix, summary)
-		c.UI.CompleteKept(jobID, summary)
-
-		os.MkdirAll(finalDir, 0755) //nolint:errcheck
-
-		baseName := strings.TrimSuffix(filepath.Base(job.FilePath), filepath.Ext(job.FilePath))
-		finalPath := filepath.Join(finalDir, baseName+outputExt)
-		if _, err := os.Stat(finalPath); err == nil {
-			finalPath = filepath.Join(finalDir, fmt.Sprintf("%s__%s%s", baseName, hash8, outputExt))
+		if err := os.MkdirAll(finalDir, 0755); err != nil {
+			c.Log.Errorf("Failed to create output directory %s: %v", finalDir, err)
+			c.removeTemp(tempPath)
+			c.failJob(ctx, jobID, job, fileName, "mkdir_final_failed")
+			return
 		}
 
-		if err := MoveFile(tempPath, finalPath); err != nil {
+		baseName := strings.TrimSuffix(filepath.Base(job.FilePath), filepath.Ext(job.FilePath))
+		// Name choice + move are serialised so two workers can neither pick the
+		// same free name nor overwrite each other's output.
+		finalMu.Lock()
+		finalPath := uniqueFinalPath(finalDir, baseName, hash8, outputExt)
+		moveErr := MoveFile(tempPath, finalPath)
+		finalMu.Unlock()
+
+		if errors.Is(moveErr, ErrSourceNotRemoved) {
+			// Output is in place; just report the leftover temp file.
+			c.Log.Warnf("Output saved to %s but temp file %s was not removed: %v", finalPath, tempPath, moveErr)
+			moveErr = nil
+		}
+
+		if err := moveErr; err != nil {
 			c.Log.Errorf("Failed to move file to final location for %s: %v", job.FilePath, err)
 			c.UI.CompleteError(jobID, fmt.Sprintf("✗ ERROR   [%d/%d] %s", job.FileNumber, job.TotalFiles, fileName))
 			if dbErr := c.DB.UpdateRecord(ctx, job.DriveRoot, job.FileHash, types.Record{
@@ -258,10 +335,16 @@ func (c *Converter) Process(ctx context.Context, job types.Job, dryRun bool) {
 			}); dbErr != nil {
 				c.Log.Errorf("Failed to update error record for %s: %v", job.FilePath, dbErr)
 			}
-			os.Remove(tempPath) //nolint:errcheck
+			c.removeTemp(tempPath)
 			c.Stats.IncrFilesErrored()
 			return
 		}
+
+		// Report success only once the file is really in place, so a failed
+		// move never shows "KEPT" followed by "ERROR". Log to file only (the
+		// TUI gets it via CompleteKept; logging here would duplicate).
+		c.Log.Infof("%s%s", tui.FileOnlyPrefix, summary)
+		c.UI.CompleteKept(jobID, summary)
 
 		if err := c.DB.UpdateRecord(ctx, job.DriveRoot, job.FileHash, types.Record{
 			OriginalSize:           job.OriginalSize,
@@ -291,7 +374,7 @@ func (c *Converter) Process(ctx context.Context, job types.Job, dryRun bool) {
 		c.Log.Infof("%s%s", tui.FileOnlyPrefix, summary)
 		c.UI.CompleteDiscard(jobID, summary)
 
-		os.Remove(tempPath) //nolint:errcheck
+		c.removeTemp(tempPath)
 
 		if err := c.DB.UpdateRecord(ctx, job.DriveRoot, job.FileHash, types.Record{
 			OriginalSize:           job.OriginalSize,
@@ -311,6 +394,54 @@ func (c *Converter) Process(ctx context.Context, job types.Job, dryRun bool) {
 		}
 
 		c.Stats.AddConverted(false, job.OriginalSize, job.OriginalSize)
+	}
+}
+
+// removeTemp deletes a temporary output file, logging (not hiding) failures
+// other than "already gone".
+func (c *Converter) removeTemp(path string) {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		c.Log.Warnf("Failed to remove temp file %s: %v", path, err)
+	}
+}
+
+// failJob records an error outcome for a job that could not even start or
+// finish for a non-FFmpeg reason (e.g. cannot create a directory).
+func (c *Converter) failJob(ctx context.Context, jobID uint64, job types.Job, fileName, code string) {
+	c.UI.CompleteError(jobID, fmt.Sprintf("✗ ERROR   [%d/%d] %s", job.FileNumber, job.TotalFiles, fileName))
+	if err := c.DB.UpdateRecord(ctx, job.DriveRoot, job.FileHash, types.Record{
+		OriginalSize:    job.OriginalSize,
+		Error:           code,
+		SourceCodec:     job.CodecID,
+		SourceContainer: strings.ToLower(filepath.Ext(job.FilePath)),
+		SourcePath:      job.FilePath,
+		Width:           job.Width,
+		Height:          job.Height,
+		DurationSecs:    job.DurationSeconds,
+		ConvertedAt:     time.Now().UTC().Format(time.RFC3339),
+		RunID:           c.RunID,
+	}); err != nil {
+		c.Log.Errorf("Failed to update error record for %s: %v", job.FilePath, err)
+	}
+	c.Stats.IncrFilesErrored()
+}
+
+// finalMu serialises final-name selection and the move into place.
+var finalMu sync.Mutex
+
+// uniqueFinalPath returns a path in dir that does not exist yet: baseName+ext,
+// else baseName__hash8+ext, else baseName__hash8_N+ext.
+func uniqueFinalPath(dir, baseName, hash8, ext string) string {
+	candidate := filepath.Join(dir, baseName+ext)
+	if _, err := os.Stat(candidate); err != nil {
+		return candidate
+	}
+	candidate = filepath.Join(dir, fmt.Sprintf("%s__%s%s", baseName, hash8, ext))
+	for n := 2; ; n++ {
+		if _, err := os.Stat(candidate); err != nil {
+			return candidate
+		}
+		candidate = filepath.Join(dir, fmt.Sprintf("%s__%s_%d%s", baseName, hash8, n, ext))
 	}
 }
 
@@ -477,7 +608,8 @@ func buildMP4Args(videoInfo *types.VideoInfo, inputPath string) []string {
 }
 
 // MoveFile moves src to dst. Tries os.Rename first (atomic, same-drive),
-// then falls back to copy+delete for cross-volume moves.
+// then falls back to copy+delete for cross-volume moves. If only the final
+// delete of src fails, the returned error wraps ErrSourceNotRemoved.
 func MoveFile(src, dst string) error {
 	err := os.Rename(src, dst)
 	if err == nil {
@@ -520,12 +652,19 @@ func MoveFile(src, dst string) error {
 		os.Remove(dstTmp) //nolint:errcheck
 		return fmt.Errorf("moveFile rename dst tmp: %w", err)
 	}
-	if err := os.Remove(src); err != nil {
-		// Log is not available here — caller logs if needed.
-		_ = err
+	if err := os.Remove(src); err != nil && !os.IsNotExist(err) {
+		// The destination is complete and valid; only the source could not be
+		// deleted. Callers can detect this with errors.Is and treat it as a
+		// warning rather than a failed move.
+		return fmt.Errorf("%w: %v", ErrSourceNotRemoved, err)
 	}
 	return nil
 }
+
+// ErrSourceNotRemoved is returned (wrapped) by MoveFile when the file was
+// copied to its destination successfully but the source could not be deleted
+// (cross-volume move only). The destination is valid.
+var ErrSourceNotRemoved = errors.New("moved file but could not remove source")
 
 // jobStringer wraps a types.Job to implement fmt.Stringer for FallbackManager.
 type jobStringer struct {

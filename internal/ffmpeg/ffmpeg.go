@@ -4,10 +4,10 @@ package ffmpeg
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -23,6 +23,9 @@ const (
 	ExitCodeInternal = 999
 	// FFprobeTimeout is the maximum time allowed for an FFprobe duration query.
 	FFprobeTimeout = 30 * time.Second
+
+	// maxScanLine is the longest single stdout/stderr line the scanners accept.
+	maxScanLine = 1024 * 1024
 )
 
 // MakeSuspendFn returns a suspend/resume callback for the given *exec.Cmd.
@@ -71,11 +74,15 @@ func Run(ctx context.Context, ffmpegExe string, args []string, filePath string, 
 		defer unregister()
 	}
 
-	var stderrBuf bytes.Buffer
+	var stderrBuf boundedBuf
 	stderrDone := make(chan struct{})
 	go func() {
 		defer close(stderrDone)
+		// Always drain stderr to EOF: if the scanner stops early (e.g. a line
+		// longer than its buffer) and the pipe fills up, FFmpeg blocks forever.
+		defer io.Copy(io.Discard, stderr) //nolint:errcheck
 		errScanner := bufio.NewScanner(stderr)
+		errScanner.Buffer(make([]byte, 0, 64*1024), maxScanLine)
 		corruptErrorCount := 0
 		killed := false
 		for errScanner.Scan() {
@@ -105,6 +112,7 @@ func Run(ctx context.Context, ffmpegExe string, args []string, filePath string, 
 	lastPct := -1
 	var lastSent time.Time
 	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxScanLine)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.HasPrefix(line, "out_time_ms=") || strings.HasPrefix(line, "out_time_us=") || strings.HasPrefix(line, "out_time=") {
@@ -146,6 +154,9 @@ func Run(ctx context.Context, ffmpegExe string, args []string, filePath string, 
 		}
 	}
 
+	// Drain whatever the progress scanner left (e.g. after an over-long line) so
+	// FFmpeg can never block on a full stdout pipe.
+	io.Copy(io.Discard, stdout) //nolint:errcheck
 	<-stderrDone
 
 	if err := cmd.Wait(); err != nil {

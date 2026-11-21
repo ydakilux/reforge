@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -278,4 +279,19 @@ func TestSubmitAfterCancel(t *testing.T) {
 		}
 	}()
 	p.Wait()
+}
+
+func TestSubmitReturnsErrStoppedAfterStop(t *testing.T) {
+	for name, stop := range map[string]func(*Controller){
+		"StopAfterCurrent": (*Controller).StopAfterCurrent,
+		"StopNow":          (*Controller).StopNow,
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := NewPipeline(context.Background(), 1, 1)
+			stop(p.Controller())
+			if err := p.Submit(types.Job{}); !errors.Is(err, ErrStopped) {
+				t.Errorf("Submit err = %v, want ErrStopped", err)
+			}
+		})
+	}
 }

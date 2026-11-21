@@ -49,3 +49,28 @@ CREATE TABLE IF NOT EXISTS runs (
 );
 CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at);
 `
+
+// createRunFilesSQL creates the per-run history table. conversions has one row
+// per (file_hash, drive_root) and is overwritten whenever a file is processed
+// again, so on its own it cannot tell which files each run touched. run_files
+// keeps one immutable-per-run row for every file a run handled, so old runs
+// keep their file list and counters when a later run re-processes a file.
+// It is created by migrateSchema (not createTableSQL) so a one-time backfill
+// can detect that the table is new.
+const createRunFilesSQL = `
+CREATE TABLE IF NOT EXISTS run_files (
+    run_id          INTEGER NOT NULL,
+    file_hash       TEXT    NOT NULL,
+    drive_root      TEXT    NOT NULL,
+    source_path     TEXT,
+    output_path     TEXT,
+    original_size   INTEGER NOT NULL,
+    converted_size  INTEGER,
+    note            TEXT,
+    error           TEXT,
+    source_codec    TEXT,
+    converted_at    TIMESTAMP,
+    PRIMARY KEY (run_id, file_hash, drive_root)
+);
+CREATE INDEX IF NOT EXISTS idx_run_files_run ON run_files(run_id);
+`

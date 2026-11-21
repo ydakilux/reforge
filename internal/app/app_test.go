@@ -307,3 +307,11 @@ func TestBuildStatsSummaryBox_ContainsFileCountsAndBytes(t *testing.T) {
 		t.Error("box summary missing 'Total Time' when elapsed > 0")
 	}
 }
+
+func TestClampParallelJobs(t *testing.T) {
+	for in, want := range map[int]int{-3: 1, 0: 1, 1: 1, 5: 5, MaxParallelJobsCap: MaxParallelJobsCap, MaxParallelJobsCap + 7: MaxParallelJobsCap, 1000: MaxParallelJobsCap} {
+		if got := clampParallelJobs(in); got != want {
+			t.Errorf("clampParallelJobs(%d) = %d, want %d", in, got, want)
+		}
+	}
+}
