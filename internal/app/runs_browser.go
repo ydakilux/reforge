@@ -315,18 +315,49 @@ func (m runsBrowserModel) updateFilesPane(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			} else {
 				m.collapsedFolders[folderName] = !m.collapsedFolders[folderName]
 			}
+			// Hiding rows shifts indices: keep the cursor on this folder's header
+			// instead of landing on an unrelated row.
+			m.cursorToFolder(folderName)
 		}
 	case "C":
 		if m.collapsedFolders == nil {
 			m.collapsedFolders = make(map[string]bool)
 		}
+		cursorFolder := ""
+		if m.fileCursor >= 0 && m.fileCursor < numVisible {
+			cursorFolder = visibleItems[m.fileCursor].folderName
+		}
 		for _, g := range groups {
 			m.collapsedFolders[g.Name] = true
 		}
+		m.cursorToFolder(cursorFolder)
 	case "E":
+		cursorFolder := ""
+		if m.fileCursor >= 0 && m.fileCursor < numVisible {
+			cursorFolder = visibleItems[m.fileCursor].folderName
+		}
 		m.collapsedFolders = make(map[string]bool)
+		m.cursorToFolder(cursorFolder)
 	}
 	return m, nil
+}
+
+// cursorToFolder moves fileCursor to the header row of the named folder. If the
+// folder is not found the cursor is only clamped into range.
+func (m *runsBrowserModel) cursorToFolder(name string) {
+	_, items := m.getVisibleItems()
+	for i, it := range items {
+		if it.isFolder && it.folderName == name {
+			m.fileCursor = i
+			return
+		}
+	}
+	if m.fileCursor >= len(items) {
+		m.fileCursor = len(items) - 1
+	}
+	if m.fileCursor < 0 {
+		m.fileCursor = 0
+	}
 }
 
 // ── View ─────────────────────────────────────────────────────────────────────
@@ -867,9 +898,16 @@ func (m runsBrowserModel) renderDetailFilesFull(w int) (string, int) {
 				info = fmt.Sprintf("(%d file(s))", g.FileCount)
 			}
 
-			line := fmt.Sprintf("%s%s 📁 %s  %s", prefix, icon, g.Name, runsStyleDim.Render(info))
-			line = truncate(line, w)
-			b.WriteString(style.Render(line) + "\n")
+			// Truncate the plain text first and style afterwards: truncate() drops
+			// runes from the left, which would cut ANSI escape sequences in half
+			// if applied to an already-styled string.
+			head := fmt.Sprintf("%s%s 📁 ", prefix, icon)
+			infoW := lipgloss.Width(info) + 2
+			if nameBudget := w - lipgloss.Width(head) - infoW; nameBudget >= 4 {
+				b.WriteString(style.Render(head+truncate(g.Name, nameBudget)) + "  " + runsStyleDim.Render(info) + "\n")
+			} else {
+				b.WriteString(style.Render(truncate(head+g.Name+"  "+info, w)) + "\n")
+			}
 		} else {
 			f := m.files[item.fileIndex]
 			style := runsStyleDim
@@ -966,6 +1004,19 @@ func (m runsBrowserModel) getVisibleItems() ([]folderGroup, []visibleItem) {
 	return groups, items
 }
 
+// isWithinDir reports whether dir is root itself or lies below it, comparing
+// case-insensitively and only on whole path components (so a "Videos2" folder
+// is NOT inside "Videos").
+func isWithinDir(dir, root string) bool {
+	sep := string(filepath.Separator)
+	d := strings.TrimRight(strings.ToLower(dir), sep)
+	r := strings.TrimRight(strings.ToLower(root), sep)
+	if d == r {
+		return true
+	}
+	return strings.HasPrefix(d, r+sep)
+}
+
 func groupFilesByFolder(files []database.RunFileRecord, sourcePaths []string) []folderGroup {
 	if len(files) == 0 {
 		return nil
@@ -1001,7 +1052,7 @@ func groupFilesByFolder(files []database.RunFileRecord, sourcePaths []string) []
 
 		bestMatch := ""
 		for _, sp := range cleanSources {
-			if strings.HasPrefix(strings.ToLower(cleanDir), strings.ToLower(sp)) {
+			if isWithinDir(cleanDir, sp) {
 				if len(sp) > len(bestMatch) {
 					bestMatch = sp
 				}

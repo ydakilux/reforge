@@ -296,6 +296,12 @@ func (m model) Init() tea.Cmd {
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// ── Setup phase ───────────────────────────────────────────────────────────
 	if m.phase == phaseSetup {
+		// Keep the repaint loop alive: if it dies here nothing restarts it, and
+		// the converting phase would only repaint when some other message
+		// arrives (timers/ETA frozen, nothing at all while paused).
+		if _, ok := msg.(msgTick); ok {
+			return m, tickCmd()
+		}
 		// Always propagate window size to setup sub-model.
 		if ws, ok := msg.(tea.WindowSizeMsg); ok {
 			m.width = ws.Width
@@ -470,7 +476,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case msgJobProgress:
 		if js, ok := m.jobIndex[msg.id]; ok {
-			js.pct = msg.pct
+			js.pct = clampPct(msg.pct)
 		}
 		return m, nil
 
@@ -899,6 +905,19 @@ func (m model) lastLogLines(n int) []logLine {
 	return m.logLines[len(m.logLines)-n:]
 }
 
+// clampPct bounds a progress percentage to [0, 100]. FFmpeg can report more
+// than 100% when the probed duration is slightly short, which would otherwise
+// show "103%" and produce a negative ETA.
+func clampPct(p int) int {
+	if p < 0 {
+		return 0
+	}
+	if p > 100 {
+		return 100
+	}
+	return p
+}
+
 // renderBar renders a Unicode block progress bar of the given width.
 func renderBar(pct, width int) string {
 	if width <= 0 {
@@ -1002,9 +1021,10 @@ func New(opts SetupOptions, onControl func(action ControlAction)) (*UI, <-chan S
 
 	// If stdout is not a terminal, skip Bubble Tea entirely — it requires a TTY.
 	if !term.IsTerminal(int(os.Stdout.Fd())) {
-		// Deliver zero-value answers so callers don't block.
+		// Deliver zero-value answers (NOT Cancelled) so callers proceed using
+		// their CLI flags/config; a missing input path is reported by the caller.
 		go func() {
-			answersCh <- SetupAnswers{Cancelled: true}
+			answersCh <- SetupAnswers{}
 			close(answersCh)
 		}()
 		return &UI{plain: true, plainW: os.Stdout, logW: &tuiWriter{plain: true, plainW: os.Stdout}}, answersCh

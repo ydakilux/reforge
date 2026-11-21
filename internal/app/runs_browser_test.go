@@ -2,9 +2,11 @@ package app
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/ydakilux/reforge/internal/database"
 )
@@ -106,5 +108,103 @@ func TestRunsBrowserCollapseExpand(t *testing.T) {
 	_, items = m.getVisibleItems()
 	if len(items) != 5 {
 		t.Fatalf("expected 5 visible items after expand all, got %d", len(items))
+	}
+}
+
+// A sibling folder that merely shares a name prefix with a source root must not
+// be grouped as if it were inside that root.
+func TestGroupFilesByFolder_PathBoundary(t *testing.T) {
+	src := filepath.Join("C:", "Media", "Videos")
+	files := []database.RunFileRecord{
+		{SourcePath: filepath.Join(src, "Sub", "a.mp4")},
+		{SourcePath: filepath.Join("C:", "Media", "Videos2", "x", "b.mp4")},
+	}
+	for _, g := range groupFilesByFolder(files, []string{src}) {
+		if strings.HasPrefix(g.Name, "..") {
+			t.Errorf("group %q escapes the source root (prefix match without path boundary)", g.Name)
+		}
+	}
+}
+
+func TestIsWithinDir(t *testing.T) {
+	root := filepath.Join("C:", "Media", "Videos")
+	cases := []struct {
+		dir  string
+		want bool
+	}{
+		{root, true},
+		{filepath.Join(root, "A", "B"), true},
+		{strings.ToUpper(filepath.Join(root, "a")), true},
+		{filepath.Join("C:", "Media", "Videos2"), false},
+		{filepath.Join("C:", "Media"), false},
+	}
+	for _, c := range cases {
+		if got := isWithinDir(c.dir, root); got != c.want {
+			t.Errorf("isWithinDir(%q, %q) = %v, want %v", c.dir, root, got, c.want)
+		}
+	}
+}
+
+// Truncating a long folder line must keep the marker/prefix and the size info
+// and never exceed the width (no left-chopped ANSI sequences).
+func TestRenderFolderLineTruncationKeepsHead(t *testing.T) {
+	src := filepath.Join("C:", "Media")
+	long := strings.Repeat("VeryLongFolderName", 6)
+	m := newRunsBrowserModel(nil)
+	m.pane = paneFiles
+	m.runs = []database.RunSummary{{ID: 1, SourcePaths: []string{src}}}
+	m.files = []database.RunFileRecord{{SourcePath: filepath.Join(src, long, "a.mp4"), OriginalSize: 10, ConvertedSize: 5}}
+	m.loadedFor = 0
+
+	out, _ := m.renderDetailFilesFull(40)
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "📁") {
+			if lipgloss.Width(line) > 40 {
+				t.Errorf("folder line wider than 40: %d", lipgloss.Width(line))
+			}
+			if !strings.Contains(line, "▼") {
+				t.Errorf("folder marker lost by truncation: %q", line)
+			}
+			if !strings.Contains(line, "file(s)") {
+				t.Errorf("folder info lost by truncation: %q", line)
+			}
+			return
+		}
+	}
+	t.Fatal("no folder line rendered")
+}
+
+// Collapsing from a file row must leave the cursor on that folder's header, and
+// "collapse all" must keep the cursor inside the (now shorter) list.
+func TestCollapseKeepsCursorOnFolderHeader(t *testing.T) {
+	src := filepath.Join("C:", "Media")
+	m := newRunsBrowserModel(nil)
+	m.pane = paneFiles
+	m.files = []database.RunFileRecord{
+		{SourcePath: filepath.Join(src, "A", "1.mp4")},
+		{SourcePath: filepath.Join(src, "A", "2.mp4")},
+		{SourcePath: filepath.Join(src, "B", "3.mp4")},
+	}
+	m.runs = []database.RunSummary{{ID: 1, SourcePaths: []string{src}}}
+	m.loadedFor = 0
+	m.width, m.height = 80, 24
+
+	// items: [A][A1][A2][B][B3]; put the cursor on A2 and collapse.
+	m.fileCursor = 2
+	u, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	m = u.(runsBrowserModel)
+	_, items := m.getVisibleItems()
+	if m.fileCursor < 0 || m.fileCursor >= len(items) || !items[m.fileCursor].isFolder || items[m.fileCursor].folderName != "A" {
+		t.Fatalf("cursor %d not on folder A header; items=%+v", m.fileCursor, items)
+	}
+
+	// Cursor on a B file, collapse all: must stay in range, on B's header.
+	m.collapsedFolders = map[string]bool{}
+	m.fileCursor = 4
+	u, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'C'}})
+	m = u.(runsBrowserModel)
+	_, items = m.getVisibleItems()
+	if m.fileCursor >= len(items) || items[m.fileCursor].folderName != "B" {
+		t.Fatalf("after collapse-all cursor %d invalid; items=%+v", m.fileCursor, items)
 	}
 }
