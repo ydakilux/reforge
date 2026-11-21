@@ -119,6 +119,7 @@ func Produce(files []string, fileToBaseDir map[string]string, pipe *pipeline.Pip
 	totalFiles := len(files)
 	globalFileNumber := 0
 
+scan:
 	for folderIdx, folder := range folders {
 		folderNumber := folderIdx + 1
 		filesInFolder := folderMap[folder]
@@ -126,6 +127,13 @@ func Produce(files []string, fileToBaseDir map[string]string, pipe *pipeline.Pip
 		cfg.Log.Infof("\nProcessing folder %d/%d: %s (%d files)", folderNumber, totalFolders, folder, len(filesInFolder))
 
 		for _, filePath := range filesInFolder {
+			// Stop scanning as soon as the user asked to stop: otherwise every
+			// remaining file would still be hashed/probed (and written to the
+			// DB) before the pipeline could drain.
+			if pipe.Controller().Mode() != pipeline.StopModeNone {
+				cfg.Log.Info("Stop requested — ending file scan")
+				break scan
+			}
 			globalFileNumber++
 			cfg.Log.Debugf("[%d/%d] Analyzing: %s", globalFileNumber, totalFiles, filepath.Base(filePath))
 
@@ -240,7 +248,10 @@ func Produce(files []string, fileToBaseDir map[string]string, pipe *pipeline.Pip
 				VideoInfo:       videoInfo,
 				GPUIndex:        cfg.GPUAssigner.Next(),
 			}
-			pipe.Submit(job) //nolint:errcheck
+			if err := pipe.Submit(job); err != nil {
+				cfg.Log.Infof("Stopping file scan: %v", err)
+				break scan
+			}
 		}
 	}
 }

@@ -697,3 +697,30 @@ func TestGetFormatBreakdown_SizeAggregation(t *testing.T) {
 		t.Errorf("h264/matroska TotalConverted = %d, want 54000", s.TotalConverted)
 	}
 }
+
+// Records just inside/outside the 7-day cutoff must be classified correctly
+// even when they fall on the cutoff's calendar day (RFC3339 'T' vs SQLite ' ').
+func TestGetSpaceSaved_WeekBoundaryHourPrecision(t *testing.T) {
+	store := newTestSQLiteStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	add := func(hash string, at time.Time) {
+		t.Helper()
+		if err := store.UpdateRecord(ctx, `D:\`, hash, types.Record{
+			OriginalSize: 1000, ConvertedSize: 400, Output: `D:\REFORGED\x.mp4`,
+			ConvertedAt: at.Format(time.RFC3339),
+		}); err != nil {
+			t.Fatalf("UpdateRecord: %v", err)
+		}
+	}
+	add("inside", now.Add(-7*24*time.Hour+2*time.Hour))
+	add("outside", now.Add(-7*24*time.Hour-2*time.Hour))
+
+	res, err := store.GetSpaceSaved(ctx, "week")
+	if err != nil {
+		t.Fatalf("GetSpaceSaved: %v", err)
+	}
+	if res.FileCount != 1 {
+		t.Errorf("FileCount = %d, want 1 (only the record inside the 7-day window)", res.FileCount)
+	}
+}

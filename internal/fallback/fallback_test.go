@@ -149,3 +149,36 @@ func TestFallbackThreadSafety(t *testing.T) {
 		}
 	}
 }
+
+// The first GPU failure settles the decision for the whole run: later files
+// must not re-prompt the user.
+func TestFallbackInteractiveDecisionIsRemembered(t *testing.T) {
+	// Only ONE answer is available; a second prompt would hit EOF (which also
+	// returns true), so use "n" to make a re-prompt observable via the result.
+	fm := NewFallbackManager(true, strings.NewReader("n\n"), newTestLogger())
+	enc := &mockEncoder{isGPU: true, msg: "gpu failure"}
+	job := &mockJob{name: "a.mkv"}
+
+	first, _ := fm.HandleGPUError("x", enc, job)
+	second, _ := fm.HandleGPUError("x", enc, job) // would be EOF -> true if re-prompted
+	if first || second {
+		t.Errorf("got first=%v second=%v, want both false (declined once, remembered)", first, second)
+	}
+	if fm.CPUOnly() {
+		t.Error("CPUOnly should be false after the user declined")
+	}
+}
+
+func TestFallbackNonInteractiveSetsCPUOnly(t *testing.T) {
+	fm := NewFallbackManager(false, strings.NewReader(""), newTestLogger())
+	if fm.CPUOnly() {
+		t.Fatal("CPUOnly should start false")
+	}
+	enc := &mockEncoder{isGPU: true, msg: "gpu failure"}
+	if ok, _ := fm.HandleGPUError("x", enc, &mockJob{name: "a"}); !ok {
+		t.Fatal("expected fallback")
+	}
+	if !fm.CPUOnly() {
+		t.Error("CPUOnly should be true after a handled GPU failure")
+	}
+}

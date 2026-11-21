@@ -96,3 +96,12 @@ func (a *GPUAssigner) NumGPUs() int {
 	}
 	return len(a.gpus)
 }
+
+// GPUs returns a copy of the sorted GPU indices this assigner distributes
+// across. Returns nil for a nil receiver.
+func (a *GPUAssigner) GPUs() []int {
+	if a == nil {
+		return nil
+	}
+	return append([]int(nil), a.gpus...)
+}

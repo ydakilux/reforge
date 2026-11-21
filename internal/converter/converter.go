@@ -48,6 +48,8 @@ type Converter struct {
 	// RunID, when non-zero, is stamped onto every conversion record this
 	// converter writes so they can be grouped under a single run row.
 	RunID int64
+	// GPUSlots, when non-nil, caps concurrent encodes per GPU. Nil means no cap.
+	GPUSlots *pipeline.GPUSlots
 }
 
 // Process converts a single job. It is safe to call from multiple goroutines.
@@ -114,10 +116,40 @@ func (c *Converter) Process(ctx context.Context, job types.Job, dryRun bool) {
 
 	tempPath := filepath.Join(tempDir, fmt.Sprintf("%s%s%s", TempFilePrefix, hash8, outputExt))
 
+	// Once a GPU failure has been handled with a CPU fallback, every later file
+	// goes straight to CPU instead of retrying the GPU (and re-prompting).
+	encoderName := c.Config.VideoEncoder
+	cpuOnly := encoderName == "libx265" || (c.FallbackManager != nil && c.FallbackManager.CPUOnly())
+
+	// Reserve a per-GPU slot so a GPU never runs more than MaxEncodesPerGPU
+	// encodes at once; the granted GPU may differ from the pre-assigned one.
+	releaseSlot := func() {}
+	gpuIndex := job.GPUIndex
+	if !cpuOnly {
+		var slotErr error
+		gpuIndex, releaseSlot, slotErr = c.GPUSlots.Acquire(ctx, job.GPUIndex)
+		if slotErr != nil {
+			c.Log.Warnf("Cancelled while waiting for a GPU slot: %s", fileName)
+			c.UI.CompleteError(jobID, fmt.Sprintf("✗ CANCELLED [%d/%d] %s", job.FileNumber, job.TotalFiles, fileName))
+			os.Remove(tempPath) //nolint:errcheck
+			return
+		}
+	}
+	defer func() { releaseSlot() }() // releaseSlot is idempotent per slot
+
 	// Build FFmpeg args
-	qualityArgs := c.SelectedEncoder.QualityArgs(c.Config.QualityPreset, job.Width)
-	deviceArgs := c.SelectedEncoder.DeviceArgs(job.GPUIndex)
-	args := BuildConversionArgs(job.FilePath, tempPath, outputExt, c.Config.VideoEncoder, qualityArgs, deviceArgs, job.VideoInfo)
+	var qualityArgs, deviceArgs []string
+	if cpuOnly && encoderName != "libx265" {
+		cpuEncoder, _ := c.EncoderRegistry.Get("libx265")
+		qualityArgs = cpuEncoder.QualityArgs(c.Config.QualityPreset, job.Width)
+		encoderName = "libx265"
+	} else {
+		qualityArgs = c.SelectedEncoder.QualityArgs(c.Config.QualityPreset, job.Width)
+		if !cpuOnly {
+			deviceArgs = c.SelectedEncoder.DeviceArgs(gpuIndex)
+		}
+	}
+	args := BuildConversionArgs(job.FilePath, tempPath, outputExt, encoderName, qualityArgs, deviceArgs, job.VideoInfo)
 
 	// Register suspend/resume callback with the pipeline controller
 	var registerSuspend func(fn func(suspend bool)) (unregister func())
@@ -134,12 +166,13 @@ func (c *Converter) Process(ctx context.Context, job types.Job, dryRun bool) {
 	rc, stderrOut := ffmpeg.Run(ctx, ffmpegExe, args, job.FilePath, job.DurationSeconds, c.Log, onProgress, registerSuspend)
 
 	// GPU fallback
-	if rc != 0 && c.Config.VideoEncoder != "libx265" {
+	if rc != 0 && encoderName != "libx265" {
 		shouldFallback, fbErr := c.FallbackManager.HandleGPUError(stderrOut, c.SelectedEncoder, &jobStringer{job})
 		if fbErr != nil {
 			c.Log.Warnf("Fallback error: %v", fbErr)
 		}
 		if shouldFallback {
+			releaseSlot() // CPU encode no longer occupies a GPU
 			c.Log.Info("Falling back to CPU encoder (libx265)...")
 			cpuEncoder, _ := c.EncoderRegistry.Get("libx265")
 			cpuQualityArgs := cpuEncoder.QualityArgs(c.Config.QualityPreset, job.Width)
@@ -229,10 +262,6 @@ func (c *Converter) Process(ctx context.Context, job types.Job, dryRun bool) {
 		savedMB := origMB - newMB
 		summary := fmt.Sprintf("✓ KEPT    [%d/%d] %-32s  %.2f MB → %.2f MB  (-%.2f MB, %.1f%%)",
 			job.FileNumber, job.TotalFiles, fileutil.TruncateString(fileName, 32), origMB, newMB, savedMB, reduction)
-		// Log to file only (TUI gets it via CompleteKept; logging here would duplicate).
-		c.Log.Infof("%s%s", tui.FileOnlyPrefix, summary)
-		c.UI.CompleteKept(jobID, summary)
-
 		os.MkdirAll(finalDir, 0755) //nolint:errcheck
 
 		baseName := strings.TrimSuffix(filepath.Base(job.FilePath), filepath.Ext(job.FilePath))
@@ -262,6 +291,12 @@ func (c *Converter) Process(ctx context.Context, job types.Job, dryRun bool) {
 			c.Stats.IncrFilesErrored()
 			return
 		}
+
+		// Report success only once the file is really in place, so a failed
+		// move never shows "KEPT" followed by "ERROR". Log to file only (the
+		// TUI gets it via CompleteKept; logging here would duplicate).
+		c.Log.Infof("%s%s", tui.FileOnlyPrefix, summary)
+		c.UI.CompleteKept(jobID, summary)
 
 		if err := c.DB.UpdateRecord(ctx, job.DriveRoot, job.FileHash, types.Record{
 			OriginalSize:           job.OriginalSize,

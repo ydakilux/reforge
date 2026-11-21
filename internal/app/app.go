@@ -386,6 +386,11 @@ func (a *App) runConversionPhase(sr setupResult) error {
 		Log:                 a.log,
 		RunID:               a.runID,
 	}
+	// Enforce MaxEncodesPerGPU at execution time (only meaningful with several
+	// GPUs; with a single GPU concurrency is governed by MaxParallelJobs).
+	if gpuAssigner.NumGPUs() > 1 {
+		conv.GPUSlots = pipeline.NewGPUSlots(gpuAssigner.GPUs(), a.config.MaxEncodesPerGPU)
+	}
 
 	a.pipeline.Start(func(ctx context.Context, job types.Job) pipeline.ConversionResult {
 		conv.Process(ctx, job, a.opts.DryRun)

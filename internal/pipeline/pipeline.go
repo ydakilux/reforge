@@ -5,11 +5,16 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
 	"github.com/ydakilux/reforge/internal/types"
 )
+
+// ErrStopped is returned by Submit when the controller has been told to stop
+// (after current jobs or immediately) so producers can end their scan early.
+var ErrStopped = errors.New("pipeline stopped")
 
 // ConversionResult holds the outcome of a single conversion job.
 type ConversionResult struct {
@@ -87,10 +92,10 @@ func (p *Pipeline) Start(handler func(ctx context.Context, job types.Job) Conver
 // Submit sends a job to the pipeline for processing. It blocks if the
 // jobs channel buffer is full. Returns ctx.Err() if the context is
 // cancelled before the job can be submitted. Returns ErrStopped if the
-// controller has been told to stop after current jobs.
+// controller has been told to stop (either mode).
 func (p *Pipeline) Submit(job types.Job) error {
 	if p.ctrl.Mode() != StopModeNone {
-		return p.ctx.Err()
+		return ErrStopped
 	}
 	select {
 	case p.jobs <- job:

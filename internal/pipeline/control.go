@@ -116,7 +116,7 @@ func (c *Controller) StopNow() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.stopped = true
-	c.paused = false
+	c.resumeSuspendedLocked()
 	c.mode = StopModeNow
 	c.cond.Broadcast()
 }
@@ -127,9 +127,23 @@ func (c *Controller) StopAfterCurrent() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.stopped = true
-	c.paused = false
+	c.resumeSuspendedLocked()
 	c.mode = StopModeAfterCurrent
 	c.cond.Broadcast()
+}
+
+// resumeSuspendedLocked clears the paused flag and un-suspends every running
+// FFmpeg process. Without this, stopping while paused would leave in-flight
+// processes suspended forever (Resume is a no-op once paused is false), so
+// "finish current jobs" would never complete. Caller must hold c.mu.
+func (c *Controller) resumeSuspendedLocked() {
+	if !c.paused {
+		return
+	}
+	c.paused = false
+	for _, fn := range c.suspendFns {
+		fn(false)
+	}
 }
 
 // ── State queries ─────────────────────────────────────────────────────────────
