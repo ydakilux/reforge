@@ -33,7 +33,7 @@ reforge.exe D:\Movies\ E:\Shows\
 |------|---------|-------------|
 | `--dry-run` | off | Preview what would be converted without writing any files |
 | `--bypass` | off | Re-convert files already recorded in the database |
-| `--force-hevc` | off | Re-compress files that are already H.265/HEVC |
+| `--force-hevc` | off | Re-compress files that are already H.265/HEVC (overrides an earlier "already HEVC" skip) |
 | `--same-drive` | off | Write output to the same drive as the source (skips drive prompt) |
 | `--jobs <n>` | `0` (auto) | Number of parallel conversion jobs; `0` uses the benchmark recommendation |
 | `--encoder <name>` | `auto` | Force a specific encoder (see below) |

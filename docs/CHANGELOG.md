@@ -16,10 +16,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Source/destination echo in summary** — the final TUI summary echoes resolved source paths and destination folders so users can verify them before dismissing the screen.
 - Store interface: `CreateRun`, `FinalizeRun`, `GetRuns`, `GetRunFiles` methods plus `RunInfo`, `RunStats`, `RunSummary`, `RunFileRecord` types.
 - **FFmpeg 9 compatibility** — `hevc_nvenc` encoder error detection now recognises the new `nvenc sdk version X.Y is not supported` message emitted when FFmpeg 9 is used with an NVENC SDK older than 11.1. Error messages include a reminder to update NVIDIA drivers. `hevc_amf` encoder error detection now handles the `amf_dx11` and hardware memory mapping failure patterns introduced by FFmpeg 9's AMF enhancements.
+- **Per-run file history** — new `run_files` table records every file each run handled, so re-processing a file in a later run no longer rewrites earlier runs. Created and back-filled once from existing `conversions` rows on first launch (runs already rewritten by older versions cannot be recovered). A failed re-attempt is recorded in its own run only.
+- **Confirmation before cancelling** — `q` / Ctrl+C during a conversion now asks `[y]` to confirm before killing all running encodes; any other key dismisses the prompt.
+- **Per-GPU concurrency limit** — `MaxEncodesPerGPU` is enforced when an encode starts (`GPUSlots`), not only when jobs are queued; a job can spill to a less busy GPU.
+- `tui.NewPlain(w)` — plain-text UI used when stdout is not a terminal (and by tests).
+- Tests: fake-`ffmpeg`/`ffprobe` based coverage for `--force-hevc` and cancellation, plus regression tests for each fix below.
 
 ### Changed
 - Subcommand handlers in `internal/app/subcommands.go` extracted into reusable `Render*` functions (`RenderStats`, `RenderErrors`, `RenderRecent`, `RenderNotBeneficial`, `RenderFormats`, `RenderSpaceSaved`) so the launcher can render them into a viewport instead of duplicating SQL.
 - `types.Record` gains `RunID int64` (`json:"run_id,omitempty"`); records with `RunID == 0` are written verbatim (orphan rows from prescan or pre-runs era).
+- The GPU→CPU fallback decision is now remembered for the whole run: after the first handled GPU failure, remaining files encode on CPU directly (no GPU retry, no repeated prompt in interactive mode). A "no" answer is remembered too.
+- Elapsed time, per-job ETA and the global ETA exclude time spent paused.
+- Progress is clamped to 0–100 %.
+- `MaxParallelJobs` is clamped to `[1, 8]` whatever its source (setup form, `--jobs`, config file, benchmark).
+- `--force-hevc` now overrides an `already_hevc` record left by an earlier run (previously only `--bypass` did). Files already converted or marked not beneficial are still skipped.
+- `MoveFile` returns `ErrSourceNotRemoved` when the copy succeeded but the source could not be deleted; the converter logs a warning and treats the job as successful.
+- `truncate` in the TUI counts display width instead of runes.
 
 ### Fixed
 - Runs browser: View targets `m.height - 1` rows so the bottom row stays free for bubbletea's cursor / alt-screen reset. Writing the full height scrolled the viewport on the next render and left stale lines (duplicate scroll indicators visible simultaneously when crossing the meta-to-files boundary).
@@ -27,6 +39,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Runs browser: `Errors:` stat line now colours only the integer value, fixing the mis-indentation of the following `Original:` line caused by the ANSI reset interacting with subsequent plain text.
 - Runs browser: `truncate` is visible-cell-width aware (uses `lipgloss.Width`) so multi-byte runes (→, …, ✓, ✗, ·) no longer push file rows past the pane's content width.
 - Runs browser: Up/Down/PgUp/PgDn/Home/End move only the scroll viewport; the separate file-cursor that fought the manual scroll position (snapping the viewport back to the cursor after PgDn) is gone.
+- **Stop while paused no longer hangs** — `StopAfterCurrent` / `StopNow` resume suspended FFmpeg processes; previously "finish current job" never completed after a pause.
+- **Stopping ends the file scan** — `Pipeline.Submit` returns `ErrStopped` and the producer exits, instead of hashing and probing every remaining file (and writing DB rows) after a stop.
+- A user-requested cancel is no longer recorded as an `rc_-1` error, counted in the error totals, or retried on CPU; its temp file is removed.
+- A failed re-attempt no longer overwrites the record of an earlier successful conversion.
+- **FFmpeg can no longer block on a full pipe** — scanners accept long lines, stdout/stderr are always drained, and captured stderr is bounded (head + tail).
+- "KEPT" is only reported after the converted file has been moved into place (previously "KEPT" could be followed by "ERROR").
+- Discovery no longer descends into the `REFORGED` output folder (converted files and `__tmp__` leftovers were rediscovered), de-duplicates overlapping input paths, and skips files whose content hash was already handled in the same run.
+- Temp file names include the file number and final names are chosen under a lock without overwriting, so identical files in the same folder no longer corrupt each other's output.
+- Week/month space-saved filters compare against the same RFC3339 format as `converted_at` (cut-off was off by up to a day).
+- Partial hashing surfaces read errors instead of silently producing a different hash (hash values are unchanged); `MkdirAll` and temp-file removal failures are checked and logged; a missing `libx265` encoder no longer panics; unreadable entries during discovery are logged.
+- TUI: the repaint loop is no longer lost during the setup phase (timers/ETA froze afterwards); non-TTY mode no longer reports setup as cancelled (redirected runs exited immediately); choosing a different output drive before drives finished loading no longer silently uses the source drive.
+- Runs browser: folders are grouped on whole path components (`Videos2` is no longer treated as inside `Videos`); folder lines are truncated before styling (no cut ANSI sequences); the cursor stays on the folder header after collapse/expand; `already_hevc` rows show `=` instead of a success tick; the folder grouping is cached.
 
 ---
 
