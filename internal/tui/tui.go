@@ -1096,7 +1096,7 @@ func New(opts SetupOptions, onControl func(action ControlAction)) (*UI, <-chan S
 			answersCh <- SetupAnswers{}
 			close(answersCh)
 		}()
-		return &UI{plain: true, plainW: os.Stdout, logW: &tuiWriter{plain: true, plainW: os.Stdout}}, answersCh
+		return NewPlain(os.Stdout), answersCh
 	}
 
 	// screenReady is closed as soon as the alt-screen gets its first
@@ -1146,6 +1146,13 @@ func New(opts SetupOptions, onControl func(action ControlAction)) (*UI, <-chan S
 		}
 	}
 	return u, answersCh
+}
+
+// NewPlain returns a UI that writes plain text to w instead of driving a
+// Bubble Tea program. It is what New uses when stdout is not a terminal, and it
+// lets callers (and tests) run the conversion code without a TTY.
+func NewPlain(w io.Writer) *UI {
+	return &UI{plain: true, plainW: w, logW: &tuiWriter{plain: true, plainW: w}}
 }
 
 // ControlAction mirrors the internal controlAction for external callers.
