@@ -74,8 +74,11 @@ func DiscoverFiles(paths []string, extensions []string, log *logrus.Logger) ([]s
 		}
 
 		if info.IsDir() {
-			filepath.Walk(absPath, func(path string, info os.FileInfo, err error) error { //nolint:errcheck
+			walkErr := filepath.Walk(absPath, func(path string, info os.FileInfo, err error) error {
 				if err != nil {
+					// Unreadable entry (permissions, vanished file...): keep walking
+					// but make the gap visible instead of silently skipping it.
+					log.Warnf("Skipping %s during discovery: %v", path, err)
 					return nil
 				}
 				if info.IsDir() {
@@ -89,6 +92,9 @@ func DiscoverFiles(paths []string, extensions []string, log *logrus.Logger) ([]s
 				}
 				return nil
 			})
+			if walkErr != nil {
+				log.Warnf("Discovery of %s ended early: %v", absPath, walkErr)
+			}
 		} else {
 			if extMap[strings.ToLower(filepath.Ext(absPath))] {
 				addFile(absPath, filepath.Dir(absPath))
