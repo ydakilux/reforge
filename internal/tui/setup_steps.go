@@ -107,9 +107,16 @@ func (m setupModel) updateStepOutputDrive(msg tea.KeyMsg) (setupModel, tea.Cmd) 
 			m.driveCursor++
 		}
 	case "enter":
-		if len(m.opts.AvailableDrives) > 0 {
-			m.answers.OutputDrive = m.opts.AvailableDrives[m.driveCursor].Root
+		// The drive list is detected asynchronously. If it is still empty, stay
+		// here: advancing would silently pick the source drive although the user
+		// asked for a different one (Esc remains the explicit way out).
+		if len(m.opts.AvailableDrives) == 0 {
+			return m, nil
 		}
+		if m.driveCursor >= len(m.opts.AvailableDrives) {
+			m.driveCursor = len(m.opts.AvailableDrives) - 1
+		}
+		m.answers.OutputDrive = m.opts.AvailableDrives[m.driveCursor].Root
 		return m.advanceAndReturn()
 	case "esc":
 		m.answers.OutputDrive = ""

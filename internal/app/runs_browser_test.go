@@ -208,3 +208,51 @@ func TestCollapseKeepsCursorOnFolderHeader(t *testing.T) {
 		t.Fatalf("after collapse-all cursor %d invalid; items=%+v", m.fileCursor, items)
 	}
 }
+
+func TestAlreadyHEVCRowNotShownAsSuccess(t *testing.T) {
+	src := filepath.Join("C:", "Media")
+	m := newRunsBrowserModel(nil)
+	m.runs = []database.RunSummary{{ID: 1, SourcePaths: []string{src}}}
+	m.files = []database.RunFileRecord{
+		{SourcePath: filepath.Join(src, "hevc.mkv"), Note: "already_hevc", OriginalSize: 10, ConvertedSize: 10},
+		{SourcePath: filepath.Join(src, "done.mkv"), OriginalSize: 10, ConvertedSize: 5},
+	}
+	m.loadedFor = 0
+
+	out, _ := m.renderDetailFilesFull(80)
+	for _, line := range strings.Split(out, "\n") {
+		switch {
+		case strings.Contains(line, "hevc.mkv"):
+			if strings.Contains(line, "✓") || !strings.Contains(line, "=") {
+				t.Errorf("already_hevc row should use '=': %q", line)
+			}
+		case strings.Contains(line, "done.mkv"):
+			if !strings.Contains(line, "✓") {
+				t.Errorf("converted row should keep ✓: %q", line)
+			}
+		}
+	}
+}
+
+func TestFolderGroupsAreCached(t *testing.T) {
+	src := filepath.Join("C:", "Media")
+	m := newRunsBrowserModel(nil)
+	m.runs = []database.RunSummary{{ID: 1, SourcePaths: []string{src}}}
+	m.files = []database.RunFileRecord{{SourcePath: filepath.Join(src, "A", "1.mp4")}}
+	m.loadedFor = 0
+
+	g1 := m.getFolderGroups()
+	g2 := m.getFolderGroups()
+	if len(g1) == 0 || &g1[0] != &g2[0] {
+		t.Fatal("second call should reuse the cached grouping")
+	}
+
+	// A different file list (new slice) must invalidate the cache.
+	m.files = []database.RunFileRecord{
+		{SourcePath: filepath.Join(src, "A", "1.mp4")},
+		{SourcePath: filepath.Join(src, "B", "2.mp4")},
+	}
+	if g3 := m.getFolderGroups(); len(g3) != 2 {
+		t.Errorf("stale cache: got %d groups, want 2", len(g3))
+	}
+}

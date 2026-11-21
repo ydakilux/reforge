@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 // ── togglePath ───────────────────────────────────────────────────────────────
@@ -261,5 +263,26 @@ func TestScanPathsDeduplicate(t *testing.T) {
 	}
 	if len(sc.baseDirs) != 1 {
 		t.Errorf("deduplicate baseDirs: got %d, want 1", len(sc.baseDirs))
+	}
+}
+
+// Choosing "different drive" before the async drive list has arrived must not
+// silently fall back to the source drive on Enter.
+func TestOutputDriveEnterIgnoredUntilDrivesLoaded(t *testing.T) {
+	m := newSetupModel(SetupOptions{NeedOutputDrive: true})
+	m.step = stepOutputDrive
+	m.driveYesAsked = true
+	m.driveWantsDiff = true
+
+	m2, _ := m.updateStepOutputDrive(tea.KeyMsg{Type: tea.KeyEnter})
+	if m2.step != stepOutputDrive {
+		t.Fatalf("step = %v, want to stay on the drive list while it is empty", m2.step)
+	}
+
+	// Once drives arrive, Enter selects the highlighted one.
+	m2.opts.AvailableDrives = []DriveInfo{{Root: `E:\`, Label: `E:\`}}
+	m3, _ := m2.updateStepOutputDrive(tea.KeyMsg{Type: tea.KeyEnter})
+	if m3.answers.OutputDrive != `E:\` {
+		t.Errorf("OutputDrive = %q, want E:\\", m3.answers.OutputDrive)
 	}
 }

@@ -73,7 +73,7 @@ func (s *SQLiteStore) GetRuns(ctx context.Context, limit int) ([]RunSummary, err
 		                         THEN 1 ELSE 0 END), 0)                                 AS kept,
 		       COALESCE(COUNT(c.rowid), 0)                                              AS attached
 		FROM runs r
-		LEFT JOIN conversions c ON c.run_id = r.id
+		LEFT JOIN run_files c ON c.run_id = r.id
 		GROUP BY r.id
 		ORDER BY r.started_at DESC, r.id DESC`
 	var args []interface{}
@@ -126,14 +126,14 @@ func (s *SQLiteStore) GetRuns(ctx context.Context, limit int) ([]RunSummary, err
 	return results, nil
 }
 
-// GetRunFiles returns every conversions row attached to the given run, ordered
+// GetRunFiles returns every file a run handled (from the run_files history), ordered
 // by converted_at ascending so the user sees them in chronological order.
 func (s *SQLiteStore) GetRunFiles(ctx context.Context, runID int64) ([]RunFileRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT file_hash, drive_root, source_path, output_path,
 		       original_size, converted_size, note, error,
 		       source_codec, converted_at
-		FROM conversions
+		FROM run_files
 		WHERE run_id = ?
 		ORDER BY converted_at ASC, rowid ASC`, runID)
 	if err != nil {

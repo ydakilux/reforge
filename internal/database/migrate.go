@@ -29,6 +29,38 @@ func migrateSchema(ctx context.Context, db *sql.DB) error {
 	if err := backfillLegacyRuns(ctx, db); err != nil {
 		return fmt.Errorf("backfill legacy runs: %w", err)
 	}
+	if err := ensureRunFilesTable(ctx, db); err != nil {
+		return fmt.Errorf("ensure run_files: %w", err)
+	}
+	return nil
+}
+
+// ensureRunFilesTable creates the run_files history table. When the table is
+// created now (older database), it is seeded once from the current conversions
+// rows so existing runs keep showing their files.
+func ensureRunFilesTable(ctx context.Context, db *sql.DB) error {
+	var n int
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='run_files'`).Scan(&n); err != nil {
+		return fmt.Errorf("check run_files: %w", err)
+	}
+	existed := n > 0
+	if _, err := db.ExecContext(ctx, createRunFilesSQL); err != nil {
+		return fmt.Errorf("create run_files: %w", err)
+	}
+	if existed {
+		return nil
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT OR IGNORE INTO run_files
+			(run_id, file_hash, drive_root, source_path, output_path, original_size,
+			 converted_size, note, error, source_codec, converted_at)
+		SELECT run_id, file_hash, drive_root, source_path, output_path, original_size,
+		       converted_size, note, error, source_codec, converted_at
+		FROM conversions
+		WHERE run_id IS NOT NULL`); err != nil {
+		return fmt.Errorf("backfill run_files: %w", err)
+	}
 	return nil
 }
 

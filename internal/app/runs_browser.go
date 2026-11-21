@@ -83,6 +83,11 @@ type runsBrowserModel struct {
 	// run selection changes.
 	detailScroll int
 
+	// gcache memoises the folder grouping of the loaded file list: grouping is
+	// O(files x sources) and would otherwise be redone on every key press and
+	// every frame. It is a pointer so it survives bubbletea's model copies.
+	gcache *groupCache
+
 	pane   runsBrowserPane
 	width  int
 	height int
@@ -95,7 +100,16 @@ func newRunsBrowserModel(store database.Store) runsBrowserModel {
 		loadedFor:        -1,
 		result:           runsBrowserBack,
 		collapsedFolders: make(map[string]bool),
+		gcache:           &groupCache{},
 	}
+}
+
+// groupCache holds the grouping computed for one (file list, run) pair.
+type groupCache struct {
+	first  *database.RunFileRecord // identity of the cached file slice
+	n      int
+	runIdx int
+	groups []folderGroup
 }
 
 // runsLoadedMsg / filesLoadedMsg are emitted by background commands so the
@@ -926,6 +940,10 @@ func (m runsBrowserModel) renderDetailFilesFull(w int) (string, int) {
 				style = runsStyleError
 			} else if f.Note == "not_beneficial" {
 				status = "·"
+			} else if f.Note == "already_hevc" {
+				// Skipped (already HEVC): nothing was converted, so don't show
+				// the success tick.
+				status = "="
 			}
 
 			prefix := "    "
@@ -974,7 +992,16 @@ func (m runsBrowserModel) getFolderGroups() []folderGroup {
 	if m.runCursor >= 0 && m.runCursor < len(m.runs) {
 		sourcePaths = m.runs[m.runCursor].SourcePaths
 	}
-	return groupFilesByFolder(m.files, sourcePaths)
+	if m.gcache == nil {
+		return groupFilesByFolder(m.files, sourcePaths)
+	}
+	c := m.gcache
+	if c.first == &m.files[0] && c.n == len(m.files) && c.runIdx == m.runCursor && c.groups != nil {
+		return c.groups
+	}
+	groups := groupFilesByFolder(m.files, sourcePaths)
+	*c = groupCache{first: &m.files[0], n: len(m.files), runIdx: m.runCursor, groups: groups}
+	return groups
 }
 
 func (m runsBrowserModel) getVisibleItems() ([]folderGroup, []visibleItem) {
