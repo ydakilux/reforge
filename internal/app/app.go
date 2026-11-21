@@ -34,6 +34,17 @@ import (
 // MaxParallelJobsCap is the hard upper bound on concurrent conversion jobs.
 const MaxParallelJobsCap = 8
 
+// clampParallelJobs bounds n to [1, MaxParallelJobsCap].
+func clampParallelJobs(n int) int {
+	if n < 1 {
+		return 1
+	}
+	if n > MaxParallelJobsCap {
+		return MaxParallelJobsCap
+	}
+	return n
+}
+
 // AppVersion is set by main.go at startup via the version variable injected
 // by -ldflags. It is exposed here so TUI components can display it without
 // requiring the version to be threaded through every function signature.
@@ -268,6 +279,9 @@ func (a *App) runSetupPhase() (setupResult, error) {
 		}
 		a.config.MaxParallelJobs = a.opts.ParallelJobs
 	}
+	// Whatever the source (TUI form, --jobs, config file, benchmark sweep),
+	// the effective value must stay within [1, MaxParallelJobsCap].
+	a.config.MaxParallelJobs = clampParallelJobs(a.config.MaxParallelJobs)
 	if answers.OutputDrive != "" {
 		a.outputDrive = answers.OutputDrive
 	}

@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sirupsen/logrus"
 )
@@ -247,5 +248,36 @@ func TestRunBadArgs(t *testing.T) {
 	}
 	if stderr == "" {
 		t.Error("Run with bad args should return non-empty stderr")
+	}
+}
+
+// A fake "ffmpeg" that floods stderr with a single multi-megabyte line must not
+// hang Run (the pipe has to be drained) nor blow up the captured stderr.
+func TestRun_HugeStderrLineDoesNotHang(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a POSIX shell script as fake ffmpeg")
+	}
+	script := filepath.Join(t.TempDir(), "fakeffmpeg.sh")
+	body := "#!/bin/sh\nhead -c 3000000 /dev/zero | tr '\\0' 'x' >&2\necho >&2\necho 'tail-marker' >&2\nexit 3\n"
+	if err := os.WriteFile(script, []byte(body), 0755); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	var rc int
+	var stderr string
+	go func() {
+		rc, stderr = Run(context.Background(), script, nil, "in.mp4", 10, logrus.New(), nil, nil)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(20 * time.Second):
+		t.Fatal("Run hung on an over-long stderr line")
+	}
+	if rc != 3 {
+		t.Errorf("rc = %d, want 3", rc)
+	}
+	if len(stderr) > stderrHeadLimit+stderrTailLimit+len(stderrMarker)+8 {
+		t.Errorf("stderr not bounded: %d bytes", len(stderr))
 	}
 }
