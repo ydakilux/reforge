@@ -96,6 +96,16 @@ func (s *SQLiteStore) GetRecord(ctx context.Context, driveRoot, fileHash string)
 }
 
 func (s *SQLiteStore) UpdateRecord(ctx context.Context, driveRoot, fileHash string, rec types.Record) error {
+	// A failed (re)conversion must not erase the record of an earlier success:
+	// that would lose the link to the existing output file.
+	if rec.Error != "" {
+		if prev, err := s.GetRecord(ctx, driveRoot, fileHash); err == nil && prev != nil && prev.Output != "" {
+			if s.logger != nil {
+				s.logger.Warnf("Keeping existing successful record for %s (new attempt failed: %s)", prev.SourcePath, rec.Error)
+			}
+			return nil
+		}
+	}
 	_, err := s.db.ExecContext(ctx, `
 		INSERT OR REPLACE INTO conversions
 			(file_hash, drive_root, source_path, original_size, converted_size,

@@ -724,3 +724,30 @@ func TestGetSpaceSaved_WeekBoundaryHourPrecision(t *testing.T) {
 		t.Errorf("FileCount = %d, want 1 (only the record inside the 7-day window)", res.FileCount)
 	}
 }
+
+func TestUpdateRecord_ErrorDoesNotClobberSuccess(t *testing.T) {
+	store := newTestSQLiteStore(t)
+	ctx := context.Background()
+	ok := types.Record{OriginalSize: 1000, ConvertedSize: 400, Output: `D:\REFORGED\v\a.mp4`, SourcePath: `D:\v\a.mkv`}
+	if err := store.UpdateRecord(ctx, `D:\`, "h1", ok); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateRecord(ctx, `D:\`, "h1", types.Record{OriginalSize: 1000, Error: "rc_-1"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetRecord(ctx, `D:\`, "h1")
+	if err != nil || got == nil {
+		t.Fatalf("GetRecord: %v %v", got, err)
+	}
+	if got.Output != ok.Output || got.Error != "" {
+		t.Errorf("success record clobbered: %+v", got)
+	}
+
+	// An error on a never-successful file is still recorded.
+	if err := store.UpdateRecord(ctx, `D:\`, "h2", types.Record{OriginalSize: 5, Error: "rc_1"}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := store.GetRecord(ctx, `D:\`, "h2"); got == nil || got.Error != "rc_1" {
+		t.Errorf("error record not stored: %+v", got)
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	cfgpkg "github.com/ydakilux/reforge/internal/config"
+	"github.com/ydakilux/reforge/internal/converter"
 	"github.com/ydakilux/reforge/internal/database"
 	"github.com/ydakilux/reforge/internal/ffmpeg"
 	"github.com/ydakilux/reforge/internal/fileutil"
@@ -20,14 +22,42 @@ import (
 	"github.com/ydakilux/reforge/internal/types"
 )
 
+// pathKey normalises a path for duplicate detection (case-insensitive on Windows).
+func pathKey(p string) string {
+	p = filepath.Clean(p)
+	if runtime.GOOS == "windows" {
+		return strings.ToLower(p)
+	}
+	return p
+}
+
+// isOutputArtifact reports whether name is the converter's own output folder.
+// Walking into it would rediscover converted files and partial __tmp__ files.
+func isOutputArtifact(name string) bool {
+	return strings.EqualFold(name, converter.OutputDirName)
+}
+
 // DiscoverFiles walks paths and returns all matching video files with their
 // base directories. The base directory is the user-provided input path.
+// The REFORGED output folder is never descended into, and a file reachable
+// from several overlapping input paths is returned only once (first base wins).
 func DiscoverFiles(paths []string, extensions []string, log *logrus.Logger) ([]string, map[string]string) {
 	var files []string
 	fileToBaseDir := make(map[string]string)
 	extMap := make(map[string]bool)
 	for _, ext := range extensions {
 		extMap[strings.ToLower(ext)] = true
+	}
+
+	seen := make(map[string]bool)
+	addFile := func(path, baseDir string) {
+		key := pathKey(path)
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		files = append(files, path)
+		fileToBaseDir[path] = baseDir
 	}
 
 	for _, p := range paths {
@@ -48,16 +78,20 @@ func DiscoverFiles(paths []string, extensions []string, log *logrus.Logger) ([]s
 				if err != nil {
 					return nil
 				}
-				if !info.IsDir() && extMap[strings.ToLower(filepath.Ext(path))] {
-					files = append(files, path)
-					fileToBaseDir[path] = absPath
+				if info.IsDir() {
+					if path != absPath && isOutputArtifact(info.Name()) {
+						return filepath.SkipDir
+					}
+					return nil
+				}
+				if extMap[strings.ToLower(filepath.Ext(path))] {
+					addFile(path, absPath)
 				}
 				return nil
 			})
 		} else {
 			if extMap[strings.ToLower(filepath.Ext(absPath))] {
-				files = append(files, absPath)
-				fileToBaseDir[absPath] = filepath.Dir(absPath)
+				addFile(absPath, filepath.Dir(absPath))
 			}
 		}
 	}
@@ -115,6 +149,7 @@ func Produce(files []string, fileToBaseDir map[string]string, pipe *pipeline.Pip
 	}
 	sort.Strings(folders)
 
+	seenHashes := make(map[string]bool)
 	totalFolders := len(folders)
 	totalFiles := len(files)
 	globalFileNumber := 0
@@ -158,12 +193,26 @@ scan:
 				continue
 			}
 
+			// Identical content already handled in this run: converting it again
+			// is redundant and would share a temp file name.
+			dupKey := driveRoot + "|" + fileHash
+			if seenHashes[dupKey] {
+				cfg.Log.Infof("Skipping %s (duplicate content of a file already handled in this run)", filePath)
+				cfg.Stats.IncrFilesSkipped()
+				notifyFinished(info.Size())
+				continue
+			}
+			seenHashes[dupKey] = true
+
 			if !bypass {
 				rec, err := cfg.DB.GetRecord(context.Background(), driveRoot, fileHash)
 				if err != nil {
 					cfg.Log.Warnf("Failed to check DB for %s: %v", filePath, err)
 				}
-				if rec != nil && (rec.Output != "" || rec.Note == "not_beneficial" || rec.Note == "already_hevc") {
+				// An "already_hevc" note only means "skipped because HEVC"; it must not
+				// block a run where the user explicitly forces HEVC re-encoding.
+				alreadyHEVCSkip := rec != nil && rec.Note == "already_hevc" && !forceHevc
+				if rec != nil && (rec.Output != "" || rec.Note == "not_beneficial" || alreadyHEVCSkip) {
 					cfg.Log.Debugf("Skipping %s (already processed)", filePath)
 					cfg.Stats.IncrFilesSkipped()
 					notifyFinished(info.Size())

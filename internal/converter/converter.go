@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -114,7 +115,8 @@ func (c *Converter) Process(ctx context.Context, job types.Job, dryRun bool) {
 		outputExt = ".mkv"
 	}
 
-	tempPath := filepath.Join(tempDir, fmt.Sprintf("%s%s%s", TempFilePrefix, hash8, outputExt))
+	// FileNumber keeps the temp name unique even if two jobs share a hash and folder.
+	tempPath := filepath.Join(tempDir, fmt.Sprintf("%s%s_%d%s", TempFilePrefix, hash8, job.FileNumber, outputExt))
 
 	// Once a GPU failure has been handled with a CPU fallback, every later file
 	// goes straight to CPU instead of retrying the GPU (and re-prompting).
@@ -165,6 +167,15 @@ func (c *Converter) Process(ctx context.Context, job types.Job, dryRun bool) {
 	convStart := time.Now()
 	rc, stderrOut := ffmpeg.Run(ctx, ffmpegExe, args, job.FilePath, job.DurationSeconds, c.Log, onProgress, registerSuspend)
 
+	// User-requested stop: FFmpeg was killed, which is not a conversion failure.
+	// Clean up and leave no error record or error count behind.
+	if rc != 0 && ctx.Err() != nil {
+		c.Log.Infof("Conversion cancelled: %s", fileName)
+		c.UI.CompleteError(jobID, fmt.Sprintf("■ CANCELLED [%d/%d] %s", job.FileNumber, job.TotalFiles, fileName))
+		os.Remove(tempPath) //nolint:errcheck
+		return
+	}
+
 	// GPU fallback
 	if rc != 0 && encoderName != "libx265" {
 		shouldFallback, fbErr := c.FallbackManager.HandleGPUError(stderrOut, c.SelectedEncoder, &jobStringer{job})
@@ -179,6 +190,13 @@ func (c *Converter) Process(ctx context.Context, job types.Job, dryRun bool) {
 			cpuArgs := BuildConversionArgs(job.FilePath, tempPath, outputExt, "libx265", cpuQualityArgs, nil, job.VideoInfo)
 			rc, stderrOut = ffmpeg.Run(ctx, ffmpegExe, cpuArgs, job.FilePath, job.DurationSeconds, c.Log, onProgress, registerSuspend)
 		}
+	}
+
+	if rc != 0 && ctx.Err() != nil {
+		c.Log.Infof("Conversion cancelled: %s", fileName)
+		c.UI.CompleteError(jobID, fmt.Sprintf("■ CANCELLED [%d/%d] %s", job.FileNumber, job.TotalFiles, fileName))
+		os.Remove(tempPath) //nolint:errcheck
+		return
 	}
 
 	if rc != 0 {
@@ -265,12 +283,14 @@ func (c *Converter) Process(ctx context.Context, job types.Job, dryRun bool) {
 		os.MkdirAll(finalDir, 0755) //nolint:errcheck
 
 		baseName := strings.TrimSuffix(filepath.Base(job.FilePath), filepath.Ext(job.FilePath))
-		finalPath := filepath.Join(finalDir, baseName+outputExt)
-		if _, err := os.Stat(finalPath); err == nil {
-			finalPath = filepath.Join(finalDir, fmt.Sprintf("%s__%s%s", baseName, hash8, outputExt))
-		}
+		// Name choice + move are serialised so two workers can neither pick the
+		// same free name nor overwrite each other's output.
+		finalMu.Lock()
+		finalPath := uniqueFinalPath(finalDir, baseName, hash8, outputExt)
+		moveErr := MoveFile(tempPath, finalPath)
+		finalMu.Unlock()
 
-		if err := MoveFile(tempPath, finalPath); err != nil {
+		if err := moveErr; err != nil {
 			c.Log.Errorf("Failed to move file to final location for %s: %v", job.FilePath, err)
 			c.UI.CompleteError(jobID, fmt.Sprintf("✗ ERROR   [%d/%d] %s", job.FileNumber, job.TotalFiles, fileName))
 			if dbErr := c.DB.UpdateRecord(ctx, job.DriveRoot, job.FileHash, types.Record{
@@ -346,6 +366,25 @@ func (c *Converter) Process(ctx context.Context, job types.Job, dryRun bool) {
 		}
 
 		c.Stats.AddConverted(false, job.OriginalSize, job.OriginalSize)
+	}
+}
+
+// finalMu serialises final-name selection and the move into place.
+var finalMu sync.Mutex
+
+// uniqueFinalPath returns a path in dir that does not exist yet: baseName+ext,
+// else baseName__hash8+ext, else baseName__hash8_N+ext.
+func uniqueFinalPath(dir, baseName, hash8, ext string) string {
+	candidate := filepath.Join(dir, baseName+ext)
+	if _, err := os.Stat(candidate); err != nil {
+		return candidate
+	}
+	candidate = filepath.Join(dir, fmt.Sprintf("%s__%s%s", baseName, hash8, ext))
+	for n := 2; ; n++ {
+		if _, err := os.Stat(candidate); err != nil {
+			return candidate
+		}
+		candidate = filepath.Join(dir, fmt.Sprintf("%s__%s_%d%s", baseName, hash8, n, ext))
 	}
 }
 

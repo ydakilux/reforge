@@ -183,3 +183,36 @@ func TestDiscoverFiles_NonexistentPath(t *testing.T) {
 		t.Fatalf("expected empty base-dir map, got %d entries", len(baseMap))
 	}
 }
+
+func TestDiscoverFiles_SkipsReforgedOutputDir(t *testing.T) {
+	dir := t.TempDir()
+	createFile(t, filepath.Join(dir, "a.mp4"))
+	createFile(t, filepath.Join(dir, "REFORGED", "Videos", "a.mp4"))
+	createFile(t, filepath.Join(dir, "REFORGED", "_TEMP", "x", "__tmp__abcd1234_1.mp4"))
+	createFile(t, filepath.Join(dir, "Sub", "b.mp4"))
+
+	files, _ := discovery.DiscoverFiles([]string{dir}, []string{".MP4"}, newTestLogger())
+	if len(files) != 2 {
+		t.Fatalf("got %d files %v, want 2 (REFORGED must be ignored)", len(files), files)
+	}
+	for _, f := range files {
+		if filepath.Base(filepath.Dir(f)) == "Videos" || filepath.Base(f) == "__tmp__abcd1234_1.mp4" {
+			t.Errorf("output artifact discovered: %s", f)
+		}
+	}
+}
+
+func TestDiscoverFiles_OverlappingPathsDeduplicated(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "Sub")
+	createFile(t, filepath.Join(sub, "b.mp4"))
+	createFile(t, filepath.Join(dir, "a.mp4"))
+
+	files, baseMap := discovery.DiscoverFiles([]string{dir, sub}, []string{".MP4"}, newTestLogger())
+	if len(files) != 2 {
+		t.Fatalf("got %d files %v, want 2 (no duplicates)", len(files), files)
+	}
+	if got := baseMap[filepath.Join(sub, "b.mp4")]; got != dir {
+		t.Errorf("base dir = %q, want first input path %q", got, dir)
+	}
+}
